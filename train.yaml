@@ -1,0 +1,65 @@
+model:
+  # 模型的参数类型
+  dtype: "bf16"
+
+  video_model:
+    # 预测未来帧的宽高
+    predicted_frame_width: 320
+    future_frame_height: 384
+    
+    video_block_num: 30
+
+
+
+main:
+  # 每个进程的 batch_size
+  batch_size: 4
+  prediction_steps: 8
+
+  history_frames_num: 8
+  predict_frames_num: 8
+  image_height: 384
+  image_width: 320
+  precision: "bf16"
+  max_steps: 10000000
+
+  
+  dataloader:
+    data_root: "dataset/cache"
+    # 启用的cpu进程数量
+    cpu_workers_num: 16
+    pin_memory: True
+    drop_last: False
+    shuffle: True
+  # 
+
+
+
+  save: 
+    checkpoints_output: "log/"
+    checkpoints_history_num: 20
+
+  optimizer:
+    learning_rate: 5.0e-5
+    wan_learning_rate: 5.0e-5
+    weight_decay: 0.01
+
+  scheduler:
+    scheduler_type: "linear"
+    warmup_steps: 200
+    cycle_length: 5000000   
+    f_max: 0.99           
+    f_min: 0.4         
+    f_start: 1.0e-6
+
+  gradient:
+    grad_clip_norm: 0.5  # 梯度裁剪
+    grad_accumulation_steps: 1  # 梯度累计
+
+interval:
+  eval_val_unseen: 100
+  eval_val_seen_interval: 100
+
+
+inference:
+  steps_for_denoising: 10
