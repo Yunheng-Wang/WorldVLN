@@ -23,14 +23,13 @@ class WorldVLN(nn.Module):
 
         # 2. 加载 Video Model
         self.video_model = WanVideoModel.from_pretrained(
-                root_path = config.wan_root,
-                precision = config.wan_precision
+                root_path = config.video_wan_root,
+                precision = config.video_wan_precision
             )
         self.device = next(self.video_model.parameters()).device
         self.video_module = VideoModule(self.video_model, self.config, self.dtype, self.device)
         self.video_model_latent_size = torch.tensor([1 + config.predict_frame_num // 4, config.predict_frame_h // 32, config.predict_frame_w // 32], dtype=torch.long, device=self.device).unsqueeze(0).expand(config.batch_size, -1)
-
-
+        
         # 获取必要参数配置
         wan_config = {
             'dim': getattr(self.video_model.wan_model.config, 'dim'),
@@ -38,19 +37,34 @@ class WorldVLN(nn.Module):
             'head_dim': getattr(self.video_model.wan_model.config, 'dim') // getattr(self.video_model.wan_model.config, 'num_heads')
         }
 
-
         # 3. 加载 Understand Model
-        understand_config = UnderstandModelConfig()
-        self.understand_model = UnderstandModel(understand_config, wan_config,self.dtype, config.vlm_root, self.device)
+        understand_config = UnderstandModelConfig(
+            dim = self.config.understand_model_dim,
+            ffn_dim = self.config.understand_model_ffn_dim,
+            num_layers = self.config.understand_block_num,
+            vlm_projector_input_dim = self.config.understand_vlm_token_dim,
+            vlm_projector_mlp_depth = self.config.understand_vlm_projector_mlp_depth,
+            eps = self.config.understand_eps
+        )
+        self.understand_model = UnderstandModel(understand_config, wan_config, self.dtype, config.understand_vlm_root, self.device)
         self.understand_model.to(device=self.device, dtype=self.dtype)
         self.understand_module = UnderstandModule(self.understand_model, self.config, self.dtype, self.device)
 
         # 4. 加载 Action Model
-        action_config = ActionModelConfig()
+        action_config = ActionModelConfig(
+            dim = self.config.action_model_dim,
+            ffn_dim = self.config.action_model_ffn_dim,
+            num_layers = self.config.action_block_num,
+            action_dim = self.config.action_dim,
+            chunk_size = self.config.predict_frame_num,
+            encoder_mlp_depth = self.config.action_encoder_depth,
+            decoder_mlp_depth = self.config.action_decoder_depth,
+            num_registers = self.config.action_registers_num,
+            eps = self.config.action_eps,
+        )
         self.action_model = ActionModel(action_config, wan_config)
         self.action_model.to(device=self.device, dtype=self.dtype)
         self.action_module = ActionModule(self.action_model, self.config, self.dtype, self.device)
-
 
         # 定义 video model 的 Flow-Matching
         self.fm_train_scheduler_video = FlowMatchScheduler(
@@ -76,7 +90,8 @@ class WorldVLN(nn.Module):
         cur_frame: torch.Tensor,    # [B, C, H, W]
         his_frame: torch.Tensor,    # [B, N, C, H, W]
         tar_frame: torch.Tensor,    # [B, N, C, H, W]
-        actions: torch.Tensor        # [B, chunk_size, action_dim]
+        actions: torch.Tensor,        # [B, chunk_size, action_dim]
+        stop_label: torch.Tensor      # [B, 1]
     ):
         B = cur_frame.shape[0]
 
@@ -201,12 +216,18 @@ class WorldVLN(nn.Module):
         action_predict = self.action_model.decoder(action_tokens, action_head_time_emb)
         action_predict = action_predict[:, :action_predict.shape[1] - self.action_model.config.num_registers, :]
         
+        # 7. 通过 Understand Decoder (判断任务是否继续)
+        understand_predict = self.understand_model.decoder(understand_tokens)
+        understand_predict = understand_predict.squeeze(-1)
         # 7. 计算损失
         video_loss = torch.nn.functional.mse_loss(video_predict, video_target, reduction='mean')
         action_loss = torch.nn.functional.mse_loss(action_predict, action_target, reduction='mean')
-        total_loss = self.config.video_loss_weight * video_loss + self.config.action_loss_weight * action_loss
+        understand_loss_fn = torch.nn.BCEWithLogitsLoss()
+        understand_loss = understand_loss_fn(understand_predict, stop_label.view(-1).float())
+
+        total_loss = self.config.video_loss_weight * video_loss + self.config.action_loss_weight * action_loss + self.config.understand_loss_weight * understand_loss
         
-        return total_loss, video_loss, action_loss
+        return total_loss, video_loss, action_loss, understand_loss
 
 
     def inference_step(
@@ -214,7 +235,7 @@ class WorldVLN(nn.Module):
         instruction: str,           # string 
         cur_frame: torch.Tensor,    # [B, C, H, W]
         his_frame: torch.Tensor,    # [B, N, C, H, W]
-        inference_steps_num
+        inference_steps_num: int
     ):
     
         B = cur_frame.shape[0]
@@ -237,7 +258,7 @@ class WorldVLN(nn.Module):
 
         # 3. Action Model
         ## 3.1 随机初始化未来动作序列噪声latent
-        action_latent = torch.randn((B, self.config.action_chunk_size, self.config.action_dim), device=self.device, dtype=self.dtype)
+        action_latent = torch.randn((B, self.config.predict_frame_num, self.config.action_dim), device=self.device, dtype=self.dtype)
 
         # 4. 去噪
         timesteps = torch.linspace(1.0, 0.0, inference_steps_num + 1, device=self.device, dtype=self.dtype)
@@ -344,7 +365,14 @@ class WorldVLN(nn.Module):
             predicted_frames = torch.clamp(predicted_frames, 0, 1).float()
             predicted_frames = predicted_frames.permute(0, 2, 1, 3, 4)
         
+        # 6. 停止符解码（0-执行完该动作继续；1-执行完该动作停止）
+        with torch.no_grad():
+            understand_predict = self.understand_model.decoder(understand_tokens)
+            understand_predict = understand_predict.squeeze(-1)
+            understand_predict = torch.sigmoid(understand_predict)    
+            stop_flag = (understand_predict > 0.5).int()
+
         # 6. 标准化动作
         predicted_actions = action_latent.float()
 
-        return predicted_frames, predicted_actions
+        return predicted_frames, predicted_actions, stop_flag

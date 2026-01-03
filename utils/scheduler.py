@@ -112,16 +112,16 @@ def create_scheduler(optimizer, config):
     Returns:
         Learning rate scheduler
     """
-    scheduler_type = getattr(config.main.scheduler, 'scheduler_type', 'cosine')
+    scheduler_type = getattr(config.scheduler, 'scheduler_type', 'cosine')
     
     if scheduler_type == "linear":
         return LambdaLinearScheduler(
             optimizer,
-            warm_up_steps=config.main.scheduler.warmup_steps,
-            cycle_length=config.main.scheduler.cycle_length,
-            f_max=config.main.scheduler.f_max,
-            f_min=config.main.scheduler.f_min,
-            f_start=getattr(config.main.scheduler, 'f_start', 1e-6)
+            warm_up_steps=config.scheduler.warmup_steps,
+            cycle_length=config.scheduler.cycle_length,
+            f_max=config.scheduler.f_max,
+            f_min=config.scheduler.f_min,
+            f_start=getattr(config.scheduler, 'f_start', 1e-6)
         )
     elif scheduler_type == "cosine":
         # 保持向后兼容：原生PyTorch余弦（带min比例）

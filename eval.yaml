@@ -1,26 +1,34 @@
 main:
-  batch_size: 4
+  batch_size: 1
+  max_execution_steps: 10
   dtype: "bf16"
-  data_root: "dataset/cache"
-  save_root: "log/2026_01_03_0019/"
-  prediction_steps: 16
-  history_steps: 16
-  predicted_frame_width: 224
-  predicted_frame_height: 224
-  cpu_workers_num: 16
-  max_steps: 10000
+  prediction_steps: 8
+  history_steps: 8
+  predicted_frame_width: 320
+  predicted_frame_height: 384
 
 
-  gradient:
-    grad_clip_norm: 0.5  # 梯度裁剪
-    grad_accumulation_steps: 1  # 梯度累计
 
-  inference:
-    steps_for_denoising: 10
+simulator:
+  path:
+    task_root: "dataset/tasks"
+    scene_root: "dataset/scene/mp3d"
+    output: "results"
+
+  agent:
+    height: 1
+    radius: 0.1 # 0.41
+    body_type: "cylinder"
+
+  rgb_sensor:
+    hfov: 79
+    width: 640
+    height: 480
+    position: [0.0, 0.5, 0.0] 
+    orientation: [0, 0, 0]
 
 
 model:
-
   video_model:
     video_wan_root_path: "./checkpoints/Wan2.2-TI2V-5B"
     video_model_dim: 3072
@@ -49,18 +57,3 @@ model:
     video_loss_weight: 1
     action_loss_weight: 1
     understand_loss_weight: 1
-
-
-optimizer:
-  action_understand_lr: 5.0e-5
-  video_model_lr: 5.0e-5
-  weight_decay: 0.01
-
-
-scheduler:
-  scheduler_type: "linear"
-  warmup_steps: 200
-  cycle_length: 5000000   
-  f_max: 0.99           
-  f_min: 0.4         
-  f_start: 1.0e-6

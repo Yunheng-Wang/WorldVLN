@@ -72,11 +72,17 @@ class Dataset(data.Dataset):
                 # 4. 加载 instruction
                 instruction = load_instruction(episode['instruction'])
 
+                if current_frames_idx == obser_fra_num - self.predict_num - 1:
+                    stop_label = 1
+                else:
+                    stop_label = 0
+                
                 return {"cur_frame": cur_frames,
                         "his_frames": his_frames,
                         "pred_frames": pred_frames,
                         "action": actions, 
-                        "instruction": instruction}
+                        "instruction": instruction,
+                        "stop_label": stop_label}
                     
             except Exception as e:
                 continue

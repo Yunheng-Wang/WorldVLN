@@ -21,7 +21,7 @@ from scipy.spatial.transform import Rotation as R
 def env_config(config, scene_id):
     env_cfg = habitat_sim.SimulatorConfiguration()
     env_cfg.scene_id = os.path.join(config["scene_root_path"], scene_id, scene_id + ".glb")
-    env_cfg.enable_physics = True
+    env_cfg.enable_physics = False
     env_cfg.allow_sliding = True
     return env_cfg
 
@@ -208,12 +208,33 @@ def draw_change(original_path, interpolation_path, smoothed_path, save_path):
     plt.close() 
 
 
-def main_train():
+def find_more_paths_for_task(sim, reference_path):
+    all_paths = []
+    for i in range(len(reference_path) - 1):
+        start_position = reference_path[i]
+        end_position = reference_path[i + 1]
+        shortest_path = habitat_sim.ShortestPath()
+        shortest_path.requested_start = np.array(start_position)
+        shortest_path.requested_end = np.array(end_position)
+        success = sim.pathfinder.find_path(shortest_path)
+        path = shortest_path.points 
+        if success and shortest_path.points:
+            if all_paths:
+                # 如果已经有路径，去除当前路径的第一个点（避免重复）
+                points = [point.tolist() for point in shortest_path.points[1:]] 
+                all_paths.extend(points)
+            else:
+                # 如果是第一个路径，直接添加
+                all_paths.extend([point.tolist() for point in shortest_path.points]) 
+    return all_paths
+
+
+def main():
     # 1. 加载基础配置
     with open('data/preprocess/config.yaml', 'r', encoding='utf-8') as file:
         cfg = yaml.safe_load(file)
     # 2. 加载任务
-    tasks = load_task(cfg, "train")
+    tasks = load_task(cfg, cfg["type"])
     # 3. 提取数据
     for scene_id in tasks:
         ## 3.1 创建虚拟环境
@@ -221,7 +242,7 @@ def main_train():
         for id, task in enumerate(tasks[scene_id]):
             action = []
             ## 3.2 配置保存目录
-            save_path = os.path.join(cfg["output_path"], "train", "mp3d_" + "r2r_ce_" + scene_id + "_" + str(task["episode_id"]))
+            save_path = os.path.join(cfg["output_path"], cfg["type"], "mp3d_" + "r2r_ce_" + scene_id + "_" + str(task["episode_id"]))
             if os.path.exists(save_path):
                 continue
             os.makedirs(save_path, exist_ok=True)
@@ -231,9 +252,12 @@ def main_train():
                 file.write(cleaned_text)
             ## 3.4 保存 观测
             with imageio.get_writer(os.path.join(save_path, "observation.mp4"), fps=5, codec='libx264') as writer:
+                ### 3.4.0 
+                task["reference_path"] = find_more_paths_for_task(simulator, task["reference_path"])
                 ### 3.4.1 将参考路径加密 + 平滑处理
                 interpolation_path = interpolate_path(task["reference_path"], cfg["trajectory"]["interval"])
                 reference_path = smooth_path(interpolation_path, cfg["trajectory"]["smooth"][0], cfg["trajectory"]["smooth"][1])
+                # reference_path = task["reference_path"]
                 # draw_change(task["reference_path"], interpolation_path, reference_path, save_path)
                 ### 3.4.2 初始化机器人
                 agent = simulator.initialize_agent(0)
@@ -264,66 +288,7 @@ def main_train():
             # 3.5 保存 动作
             np.save(os.path.join(save_path, "action.npy"), np.array(action))
 
-        simulator.close()
-
-def main_val_seen():
-    # 1. 加载基础配置
-    with open('data/preprocess/config.yaml', 'r', encoding='utf-8') as file:
-        cfg = yaml.safe_load(file)
-    # 2. 加载任务
-    tasks = load_task(cfg, "val_seen")
-    # 3. 提取数据
-    for scene_id in tasks:
-        ## 3.1 创建虚拟环境
-        simulator, _, agent_cfg = environment(cfg, scene_id)
-        for id, task in enumerate(tasks[scene_id]):
-            action = []
-            ## 3.2 配置保存目录
-            save_path = os.path.join(cfg["output_path"], "val_seen", "mp3d_" + "r2r_ce_" + scene_id + "_" + str(task["episode_id"]))
-            if os.path.exists(save_path):
-                continue
-            os.makedirs(save_path, exist_ok=True)
-            ## 3.3 保存 指令
-            with open(os.path.join(save_path, "instruction.txt"), 'w', encoding='utf-8') as file:
-                cleaned_text = task["instruction"]["instruction_text"].replace('\n', ' ').replace('\r', ' ')
-                file.write(cleaned_text)
-            ## 3.4 保存 观测
-            with imageio.get_writer(os.path.join(save_path, "observation.mp4"), fps=5, codec='libx264') as writer:
-                ### 3.4.1 将参考路径加密 + 平滑处理
-                interpolation_path = interpolate_path(task["reference_path"], cfg["trajectory"]["interval"])
-                reference_path = smooth_path(interpolation_path, cfg["trajectory"]["smooth"][0], cfg["trajectory"]["smooth"][1])
-                # draw_change(task["reference_path"], interpolation_path, reference_path, save_path)
-                ### 3.4.2 初始化机器人
-                agent = simulator.initialize_agent(0)
-                initial_state = habitat_sim.AgentState()
-                initial_state.position = reference_path[0]
-                initial_state.rotation = task["start_rotation"]
-                agent.set_state(initial_state)
-                ### 3.4.3 移动 + 记录观测
-                for u, ref_point in enumerate(reference_path[1:]):
-                    yaw_err, _, dist_planar = get_yaw_and_dist(simulator, ref_point)
-                    if u == 0:
-                        action_point(simulator, agent_cfg, 0, yaw_err)
-                        obs = simulator.get_sensor_observations()
-                        rgb = obs["rgb_sensor"][:, :, :3]
-                        writer.append_data(rgb)
-                        delta_dis, delta_yaw = action_point(simulator, agent_cfg, dist_planar, 0)
-                        obs = simulator.get_sensor_observations()
-                        rgb = obs["rgb_sensor"][:, :, :3]
-                        writer.append_data(rgb)
-                        action.append([delta_dis, delta_yaw])
-                    else:
-                        #### 移动
-                        delta_dis, delta_yaw = action_point(simulator, agent_cfg, dist_planar, yaw_err)
-                        obs = simulator.get_sensor_observations()
-                        rgb = obs["rgb_sensor"][:, :, :3]
-                        writer.append_data(rgb)
-                        action.append([delta_dis, delta_yaw])
-            # 3.5 保存 动作
-            np.save(os.path.join(save_path, "action.npy"), np.array(action))
-            
         simulator.close()
 
 if __name__ == "__main__":
-    main_train()
-    # main_val_seen()
+    main()

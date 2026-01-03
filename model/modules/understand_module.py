@@ -23,40 +23,75 @@ class UnderstandModule(nn.Module):
         hist_vide_batch = [[Image.fromarray((frame.float().permute(1, 2, 0).numpy() * 255).astype(np.uint8), mode='RGB') for frame in video] for video in history_video_cpu]
 
         # 2. 构建VLM输入
-        input_ids_list = []
-        attention_mask_list = []
-        pixel_values_list = []
-        image_grid_thw_list = []
-        for index in range(B):
-            curr_imgs = curr_imgs_batch[index]
-            hist_vide = hist_vide_batch[index]
-            messages = [
-                {
-                    "role": "user",
-                    "content": (
-                        [{"type": "image", "image": img} for img in hist_vide]
-                        +
-                        [{"type": "image", "image": curr_imgs}]
-                        +
-                        [{"type": "text", "text": instruction_batch[index]}]
-                    )
-                }
-            ]
-            text = self.undstand_model.vlm_processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = self.undstand_model.vlm_processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            input_ids_list.append(inputs["input_ids"])          
-            attention_mask_list.append(inputs["attention_mask"])
-            pixel_values_list.append(inputs["pixel_values"])  
-            image_grid_thw_list.append(inputs["image_grid_thw"]) 
+        ## 2.1 第一步（无历史帧）
+        if len(hist_vide_batch) == 0:
+            input_ids_list = []
+            attention_mask_list = []
+            pixel_values_list = []
+            image_grid_thw_list = []
+            for index in range(B):
+                curr_imgs = curr_imgs_batch[index]
+                messages = [
+                    {
+                        "role": "user",
+                        "content": (
+                            [{"type": "image", "image": curr_imgs}]
+                            +
+                            [{"type": "text", "text": instruction_batch[index]}]
+                        )
+                    }
+                ]
+                text = self.undstand_model.vlm_processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                image_inputs, video_inputs = process_vision_info(messages)
+                inputs = self.undstand_model.vlm_processor(
+                    text=[text],
+                    images=image_inputs,
+                    videos=video_inputs,
+                    padding=True,
+                    return_tensors="pt",
+                )
+                input_ids_list.append(inputs["input_ids"])          
+                attention_mask_list.append(inputs["attention_mask"])
+                pixel_values_list.append(inputs["pixel_values"])  
+                image_grid_thw_list.append(inputs["image_grid_thw"]) 
+        ## 2.1 非第一步（有历史帧）
+        else:
+            input_ids_list = []
+            attention_mask_list = []
+            pixel_values_list = []
+            image_grid_thw_list = []
+            for index in range(B):
+                curr_imgs = curr_imgs_batch[index]
+                hist_vide = hist_vide_batch[index]
+                messages = [
+                    {
+                        "role": "user",
+                        "content": (
+                            [{"type": "image", "image": img} for img in hist_vide]
+                            +
+                            [{"type": "image", "image": curr_imgs}]
+                            +
+                            [{"type": "text", "text": instruction_batch[index]}]
+                        )
+                    }
+                ]
+                text = self.undstand_model.vlm_processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                image_inputs, video_inputs = process_vision_info(messages)
+                inputs = self.undstand_model.vlm_processor(
+                    text=[text],
+                    images=image_inputs,
+                    videos=video_inputs,
+                    padding=True,
+                    return_tensors="pt",
+                )
+                input_ids_list.append(inputs["input_ids"])          
+                attention_mask_list.append(inputs["attention_mask"])
+                pixel_values_list.append(inputs["pixel_values"])  
+                image_grid_thw_list.append(inputs["image_grid_thw"]) 
         
         # 3. batch 之间补齐
         max_len = max(x.shape[1] for x in input_ids_list)

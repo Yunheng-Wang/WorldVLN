@@ -1,3 +1,5 @@
+type: "val_unseen"
+
 
 task_root_path: "/home/CONNECT/yfang870/yunhengwang/WorldVLN/dataset/tasks"
 scene_root_path: "/home/CONNECT/yfang870/yunhengwang/WorldVLN/dataset/scene/mp3d"
@@ -10,13 +12,13 @@ trajectory:
 
 
 agent:
-  height: 1
-  radius: 0.1 # 0.41
+  height: 0.5
+  radius: 0.01 # 0.41
   body_type: "cylinder"
 
   rgb_sensor:
     hfov: 79
-    width: 640
-    height: 480
+    width: 224
+    height: 224
     position: [0.0, 0.5, 0.0] 
     orientation: [0, 0, 0]
