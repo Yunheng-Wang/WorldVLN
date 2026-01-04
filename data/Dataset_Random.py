@@ -35,10 +35,11 @@ class Dataset(data.Dataset):
     
 
     def __len__(self):
-        return len(self.all_episodes)
+        return len(self.all_episodes) * 4
 
 
     def __getitem__(self, idx):
+        """每次都随机抽取一个样本（可以重复抽取），一共可以重复抽取 len(self.all_episodes) 次"""
         while(True):
             try:
                 # 1. 随机选择一个episode

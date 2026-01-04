@@ -7,6 +7,7 @@ import json
 import torch.nn.functional as F
 import torch.distributed as dist
 import numpy as np
+from accelerate.logging import get_logger
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast
 from torch.utils.data.distributed import DistributedSampler
@@ -18,11 +19,14 @@ from datetime import datetime
 from model.WorldVLNConfig import WorldVLNConfig
 from model.WorldVLN import WorldVLN
 from utils.model_size import model_size
-from data.Dataset import Dataset
+from data.Dataset_Random import Dataset
 from data.utils.load import load_video_num
 from utils.scheduler import create_scheduler
 from utils.save import save_model_hook, save_checkpoint
 from utils.load import load_checkpoint
+from accelerate.utils import InitProcessGroupKwargs
+from datetime import datetime, timedelta
+
 
 random.seed(42)
 np.random.seed(42)
@@ -33,10 +37,12 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 torch.use_deterministic_algorithms(True, warn_only=True)
 
+
 logger = logging.getLogger(__name__)
+logging.getLogger("accelerate").setLevel(logging.ERROR)
 
 
-def setup_logging(rank, save_path = None):
+def setup_logging(rank, save_path):
     logging.basicConfig(level=logging.INFO, format=f'[Rank {rank}] %(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     formatter = logging.Formatter(f'[Rank {rank}] %(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     if rank == 0:
@@ -124,7 +130,7 @@ def build_dataloader(config, world_size, rank):
     # 2. 配置加载数据分布式
     if world_size > 1:
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
-        val_seen_sampler = DistributedSampler(val_unseen_dataset, num_replicas=world_size, rank=rank)
+        val_seen_sampler = DistributedSampler(val_unseen_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
     else:
         train_sampler = None
         val_seen_sampler = None
@@ -163,15 +169,14 @@ def learning():
         mixed_precision = config.main.dtype,
         project_dir = config.main.save_root,
         project_config = ProjectConfiguration(total_limit= 20),
+        kwargs_handlers = [InitProcessGroupKwargs(timeout=timedelta(seconds=3600))]
     )
     rank = accelerator.process_index
     world_size = accelerator.num_processes
-    if rank == 0:
-        save_path = os.path.join(config.main.save_root, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-        os.makedirs(save_path, exist_ok=True)
-        setup_logging(rank, save_path)
-    else:
-        setup_logging(rank)
+    # 
+    save_path = os.path.join(config.main.save_root, datetime.now().strftime("%Y-%m-%d_%H"))
+    os.makedirs(save_path, exist_ok=True)
+    setup_logging(rank, save_path)
     # 3. 加载模型
     if rank == 0:
         print("Loading WorldVLN Model ... ")
@@ -254,6 +259,13 @@ def learning():
                 ## 7.9.5 计算停止符准确性
                 val_stop_accuracy = (predicted_stop_flag == stop_label.view(-1)).float().mean()
                 val_loss["stop_accuracy"].append(val_stop_accuracy.item())
+                ## 7.9.6 打印
+                logger.info(
+                    f"Validation (Accumulated), Step: {step}, "
+                    f"Video Loss: {np.mean(val_loss['video_mse_loss']):.4f}, "
+                    f"Action Loss: {np.mean(val_loss['action_mse_loss']):.4f}, "
+                    f"Stop Accuracy: {np.mean(val_loss['stop_accuracy']):.4f}, "
+                ) 
 
             if dist.is_initialized():
                 gathered_losses = {}
@@ -265,18 +277,18 @@ def learning():
                     gathered_losses[key] = all_values.cpu().numpy().tolist()
             else:
                 gathered_losses = val_loss
-            
-            logger.info(
-                f"Evaluation Validation, "
-                f"Video Loss: {np.mean(gathered_losses['video_mse_loss']):.4f}, "
-                f"Action Loss: {np.mean(gathered_losses['action_mse_loss']):.4f}, "
-                f"Action MSE Loss Std: {np.mean(gathered_losses['action_mse_loss_std']):.4f}, "
-                f"Action L2 Loss: {np.mean(gathered_losses['action_l2_loss']):.4f}, "
-                f"Action L2 Loss Std: {np.mean(gathered_losses['action_l2_loss_std']):.4f}, "
-                f"Stop Accuracy: {np.mean(gathered_losses['stop_accuracy']):.4f}"
-            )           
+            if rank == 0:
+                logger.info(
+                    f"All Evaluation Validation, "
+                    f"Video Loss: {np.mean(gathered_losses['video_mse_loss']):.4f}, "
+                    f"Action Loss: {np.mean(gathered_losses['action_mse_loss']):.4f}, "
+                    f"Action MSE Loss Std: {np.mean(gathered_losses['action_mse_loss_std']):.4f}, "
+                    f"Action L2 Loss: {np.mean(gathered_losses['action_l2_loss']):.4f}, "
+                    f"Action L2 Loss Std: {np.mean(gathered_losses['action_l2_loss_std']):.4f}, "
+                    f"Stop Accuracy: {np.mean(gathered_losses['stop_accuracy']):.4f}, "
+                    f"Samples Num: {len(gathered_losses['stop_accuracy'])})"
+                )           
             model.train()
-            dist.barrier()
 
             save_checkpoint(accelerator, config, global_step, epoch, save_path)
             signal = epoch
