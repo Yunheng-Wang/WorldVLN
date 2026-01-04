@@ -2,8 +2,11 @@ checkpoints/
 
 __pycache__/
 
-dataset/
+dataset/cache/
+dataset/scene/
+dataset/tasks/rxr_ce/
 
 results/
 
 log/
+
