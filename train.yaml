@@ -2,7 +2,7 @@ main:
   batch_size: 4
   dtype: "bf16"
   data_root: "dataset/cache"
-  save_root: "log/2026_01_03_0019/"
+  save_root: "log/"
   prediction_steps: 16
   history_steps: 16
   predicted_frame_width: 224

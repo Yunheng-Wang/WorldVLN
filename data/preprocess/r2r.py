@@ -236,14 +236,16 @@ def main():
     # 2. 加载任务
     tasks = load_task(cfg, cfg["type"])
     # 3. 提取数据
-    for scene_id in tasks:
+    for i, scene_id in enumerate(tasks):
         ## 3.1 创建虚拟环境
+        print(f"Progress: {i+1}/{len(tasks)}", end="\r")
         simulator, _, agent_cfg = environment(cfg, scene_id)
         for id, task in enumerate(tasks[scene_id]):
+            print(f"Processing task {id+1}/{len(tasks[scene_id])}")
             action = []
             ## 3.2 配置保存目录
             save_path = os.path.join(cfg["output_path"], cfg["type"], "mp3d_" + "r2r_ce_" + scene_id + "_" + str(task["episode_id"]))
-            if os.path.exists(save_path):
+            if os.path.exists(os.path.join(save_path, 'action.npy')) and os.path.exists(os.path.join(save_path, 'instruction.txt')) and os.path.exists(os.path.join(save_path, 'observation.mp4')):
                 continue
             os.makedirs(save_path, exist_ok=True)
             ## 3.3 保存 指令

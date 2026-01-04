@@ -19,9 +19,9 @@ def save_model_hook(models, weights, output_dir, accelerator):
             logger.info(f"Model {i} saved to {model_save_path}")
 
 
-def save_checkpoint(accelerator, config, step):
+def save_checkpoint(accelerator, config, step, epoch, save_path):
     # 1. 保存权重 & 状态
-    checkpoint_dir = os.path.join(config.main.save.checkpoints_output, "checkpoint_step_" + str(step))
+    checkpoint_dir = os.path.join(save_path, "checkpoint_step_" + str(epoch) + "_" + str(step))
     accelerator.save_state(str(checkpoint_dir))
     logger.info(f"Checkpoint saved to {checkpoint_dir}")
     # 2. 保存配置

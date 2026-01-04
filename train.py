@@ -13,7 +13,7 @@ from torch.utils.data.distributed import DistributedSampler
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
 from omegaconf import OmegaConf
-
+from datetime import datetime
 
 from model.WorldVLNConfig import WorldVLNConfig
 from model.WorldVLN import WorldVLN
@@ -31,17 +31,21 @@ torch.cuda.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+torch.use_deterministic_algorithms(True, warn_only=True)
 
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(rank):
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f'[Rank {rank}] %(asctime)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
+def setup_logging(rank, save_path = None):
+    logging.basicConfig(level=logging.INFO, format=f'[Rank {rank}] %(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    formatter = logging.Formatter(f'[Rank {rank}] %(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    if rank == 0:
+        log_file = os.path.join(save_path, 'training.log')
+        file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter) 
+        logging.getLogger().addHandler(file_handler)  
+    
 
 def build_model_and_optimizer(config):
     # 1. 加载模型
@@ -109,6 +113,11 @@ def build_model_and_optimizer(config):
 
 
 def build_dataloader(config, world_size, rank):
+    def seed_worker(worker_id):
+        worker_seed = 42 + worker_id
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
     # 1. 加载数据
     train_dataset = Dataset(os.path.join(config.main.data_root, "train"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
     val_unseen_dataset = Dataset(os.path.join(config.main.data_root, "val_unseen"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
@@ -128,6 +137,7 @@ def build_dataloader(config, world_size, rank):
         num_workers = config.main.cpu_workers_num,
         pin_memory = True,
         drop_last = True,
+        worker_init_fn = seed_worker,
     )
     val_unseen_dataloader = DataLoader(
         val_unseen_dataset,
@@ -137,14 +147,16 @@ def build_dataloader(config, world_size, rank):
         num_workers = config.main.cpu_workers_num,
         pin_memory = True,
         drop_last = False,
+        worker_init_fn = seed_worker,
     )
 
     return train_dataloader, val_unseen_dataloader
 
 
 def learning():
-    # 1. 加载配置参数
+    # 1. 加载配置参数 & 加载保存根目录
     config = OmegaConf.load('train.yaml')
+    os.makedirs(config.main.save_root, exist_ok=True)
     # 2. 配置分布式
     accelerator = Accelerator(
         gradient_accumulation_steps = config.main.gradient.grad_accumulation_steps,
@@ -154,7 +166,12 @@ def learning():
     )
     rank = accelerator.process_index
     world_size = accelerator.num_processes
-    setup_logging(rank)
+    if rank == 0:
+        save_path = os.path.join(config.main.save_root, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+        os.makedirs(save_path, exist_ok=True)
+        setup_logging(rank, save_path)
+    else:
+        setup_logging(rank)
     # 3. 加载模型
     if rank == 0:
         print("Loading WorldVLN Model ... ")
@@ -261,7 +278,7 @@ def learning():
             model.train()
             dist.barrier()
 
-            save_checkpoint(accelerator, config, global_step)
+            save_checkpoint(accelerator, config, global_step, epoch, save_path)
             signal = epoch
             dist.barrier()
     
