@@ -14,7 +14,7 @@ import argparse
 from model.WorldVLNConfig import WorldVLNConfig
 from model.WorldVLN import WorldVLN
 from utils.load import load_r2r_ce_task
-from utils.habitat_sim import environment, action_point, get_yaw_and_dist, get_observation
+from utils.habitat_sim import environment, action_point, get_yaw_and_dist, get_observation, find_more_paths_for_task
 
 
 random.seed(42)
@@ -34,10 +34,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run eval_val_unseen")
     parser.add_argument('--checkpoint_path', type=str, required=True, help="Path to the checkpoint file")
     parser.add_argument('--gpu', type=int, required=True, help="GPU device id")
+    parser.add_argument('--gpu_num', type=int, required=True, help="GPU Number")
     return parser.parse_args()
 
 
-def eval_val_unseen(checkpoint_path, gpu_id):
+def eval_val_unseen(checkpoint_path, gpu_id, num):
     # 设置 CUDA 设备
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     print(f"Using GPU {gpu_id} for evaluation")
@@ -86,44 +87,80 @@ def eval_val_unseen(checkpoint_path, gpu_id):
     model.eval()
     # 3. 加载任务
     tasks = load_r2r_ce_task(config, "val_unseen")
-    if gpu_id == 0:
-        key = list(tasks.keys())[0]  
-        value = tasks[key]     
-        tasks = {key: value}
-    elif gpu_id == 1:
-        key = list(tasks.keys())[1]  
-        value = tasks[key]     
-        tasks = {key: value}
-    elif gpu_id == 2:
-        key_1 = list(tasks.keys())[2]  
-        value_1 = tasks[key_1]  
-        key_2 = list(tasks.keys())[9]  
-        value_2 = tasks[key_2]
-        key_3 = list(tasks.keys())[10]  
-        value_3 = tasks[key_3]   
-        tasks = {key_1: value_1, key_2: value_2, key_3: value_3}
-    elif gpu_id == 3:
-        key = list(tasks.keys())[3]  
-        value = tasks[key]     
-        tasks = {key: value}
-    elif gpu_id == 4:
-        key = list(tasks.keys())[4]  
-        value = tasks[key]     
-        tasks = {key: value}
-    elif gpu_id == 5:
-        key = list(tasks.keys())[5]  
-        value = tasks[key]     
-        tasks = {key: value}
-    elif gpu_id == 6:
-        key_1 = list(tasks.keys())[6]  
-        value_1 = tasks[key_1]  
-        key_2 = list(tasks.keys())[7]  
-        value_2 = tasks[key_2]
-        tasks = {key_1: value_1, key_2: value_2}
-    elif gpu_id == 7:
-        key = list(tasks.keys())[8]  
-        value = tasks[key]     
-        tasks = {key: value}
+    if num == 4:
+        if gpu_id == 4:
+            key_1 = list(tasks.keys())[0]  
+            value_1 = tasks[key_1]
+            key_2 = list(tasks.keys())[1]
+            value_2 = tasks[key_2]     
+            tasks = {key_1: value_1, key_2: value_2}
+        elif gpu_id == 5:
+            key_1 = list(tasks.keys())[2]  
+            value_1 = tasks[key_1]  
+            key_2 = list(tasks.keys())[9]  
+            value_2 = tasks[key_2]
+            key_3 = list(tasks.keys())[10]  
+            value_3 = tasks[key_3]  
+            key_4  = list(tasks.keys())[3] 
+            value_4 = tasks[key_4]
+            tasks = {key_1: value_1, key_2: value_2, key_3: value_3, key_4: value_4}
+        elif gpu_id == 6:
+            key_1 = list(tasks.keys())[4]  
+            value_1 = tasks[key_1]   
+            key_2 = list(tasks.keys())[5]  
+            value_2 = tasks[key_2]
+            tasks = {key_1: value_1, key_2: value_2}
+        elif gpu_id == 7:
+            key_1 = list(tasks.keys())[6]  
+            value_1 = tasks[key_1]  
+            key_2 = list(tasks.keys())[7]  
+            value_2 = tasks[key_2]
+            key_3 = list(tasks.keys())[8]  
+            value_3 = tasks[key_3] 
+            tasks = {key_1: value_1, key_2: value_2, key_3: value_3}
+    
+    elif num == 8:
+        if gpu_id == 0:
+            key = list(tasks.keys())[0]  
+            value = tasks[key]     
+            tasks = {key: value}
+        elif gpu_id == 1:
+            key = list(tasks.keys())[1]  
+            value = tasks[key]     
+            tasks = {key: value}
+        elif gpu_id == 2:
+            key_1 = list(tasks.keys())[2]  
+            value_1 = tasks[key_1]  
+            key_2 = list(tasks.keys())[9]  
+            value_2 = tasks[key_2]
+            key_3 = list(tasks.keys())[10]  
+            value_3 = tasks[key_3]   
+            tasks = {key_1: value_1, key_2: value_2, key_3: value_3}
+        elif gpu_id == 3:
+            key = list(tasks.keys())[3]  
+            value = tasks[key]     
+            tasks = {key: value}
+        elif gpu_id == 4:
+            key = list(tasks.keys())[4]  
+            value = tasks[key]     
+            tasks = {key: value}
+        elif gpu_id == 5:
+            key = list(tasks.keys())[5]  
+            value = tasks[key]     
+            tasks = {key: value}
+        elif gpu_id == 6:
+            key_1 = list(tasks.keys())[6]  
+            value_1 = tasks[key_1]  
+            key_2 = list(tasks.keys())[7]  
+            value_2 = tasks[key_2]
+            tasks = {key_1: value_1, key_2: value_2}
+        elif gpu_id == 7:
+            key = list(tasks.keys())[8]  
+            value = tasks[key]     
+            tasks = {key: value}
+    else:
+        raise ValueError("Unexpected number: {}".format(num))
+
     # 4. 执行
     results = {}
     for scene_id in tasks:
@@ -136,6 +173,7 @@ def eval_val_unseen(checkpoint_path, gpu_id):
             initial_state.rotation = task["start_rotation"]
             agent.set_state(initial_state)
             # 4.2. 先旋转到正确方向（临时）
+            task["reference_path"] = find_more_paths_for_task(simulator, task["reference_path"])
             yaw_err, _, dist_planar = get_yaw_and_dist(simulator, task["reference_path"][1])
             action_point(simulator, agent_cfg, 0, yaw_err)
             # 4.3. 模型执行
@@ -143,6 +181,7 @@ def eval_val_unseen(checkpoint_path, gpu_id):
             instruction = task["instruction"]["instruction_text"]
             L = 0
             step = 0
+            his_pos = []
             while step < config.main.max_execution_steps:
                 # 4.3.1. 获取当前观测
                 current_frame = get_observation(simulator, config)
@@ -158,12 +197,13 @@ def eval_val_unseen(checkpoint_path, gpu_id):
                 # 4.3.3 模型推理
                 with torch.no_grad():
                     predicted_frames, predicted_actions, predicted_stop_flag = model.inference_step([instruction],  current_frame,  his_frames, 10)
-                    predicted_actions = predicted_actions.squeeze(0).tolist()
+                    predicted_actions = predicted_actions.squeeze(0).tolist()[:config.main.execution_steps]
                 # 4.3.4 物理执行
                 for idx, action in enumerate(predicted_actions):
                     prev_pos = np.array(simulator.get_agent(0).get_state().position, dtype=float)
                     action_point(simulator, agent_cfg, action[0], action[1])
                     new_pos = np.array(simulator.get_agent(0).get_state().position, dtype=float)
+                    his_pos.append(new_pos)
                     L += float(np.linalg.norm(new_pos - prev_pos))
                     if idx < len(predicted_actions) - 1:
                         history.append(get_observation(simulator, config))
@@ -180,7 +220,13 @@ def eval_val_unseen(checkpoint_path, gpu_id):
                 SR = 1
             # 4.5 评估 SPL
             SPL = SR * (task['info']['geodesic_distance'] / max(L, task['info']['geodesic_distance']))
-            results[str(task["episode_id"])] = {"Step": step, "TL": L, "NE": d, "SR": SR, "SPL": SPL}
+            # 4.6 评估 OSR
+            OSR = 0
+            for i in his_pos:
+                if np.linalg.norm(i - gt_pos) <= 3:
+                    OSR = 1
+                    break
+            results[str(task["episode_id"])] = {"Step": step, "TL": L, "NE": d, "OSR": OSR, "SR": SR, "SPL": SPL}
             # 4.6 保存刷新结果
             save_path = os.path.join(config.simulator.path.output, os.path.basename(checkpoint_path) + "_" + str(gpu_id) + ".json")
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -191,4 +237,4 @@ def eval_val_unseen(checkpoint_path, gpu_id):
 
 if __name__ == "__main__":
     args = parse_args()
-    eval_val_unseen(args.checkpoint_path, args.gpu)
+    eval_val_unseen(args.checkpoint_path, args.gpu, args.gpu_num)

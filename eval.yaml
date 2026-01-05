@@ -2,10 +2,11 @@ main:
   batch_size: 1
   max_execution_steps: 10
   dtype: "bf16"
-  prediction_steps: 8
-  history_steps: 8
-  predicted_frame_width: 320
-  predicted_frame_height: 384
+  prediction_steps: 16
+  history_steps: 16
+  execution_steps: 8
+  predicted_frame_width: 224
+  predicted_frame_height: 224
 
 
 
@@ -16,19 +17,21 @@ simulator:
     output: "results"
 
   agent:
-    height: 1
-    radius: 0.1 # 0.41
+    height: 0.5
+    radius: 0.01 # 0.41
     body_type: "cylinder"
 
   rgb_sensor:
     hfov: 79
-    width: 640
-    height: 480
+    width: 224
+    height: 224
     position: [0.0, 0.5, 0.0] 
     orientation: [0, 0, 0]
 
 
+
 model:
+
   video_model:
     video_wan_root_path: "./checkpoints/Wan2.2-TI2V-5B"
     video_model_dim: 3072
