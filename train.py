@@ -18,7 +18,6 @@ from datetime import datetime
 
 from model.WorldVLNConfig import WorldVLNConfig
 from model.WorldVLN import WorldVLN
-from utils.model_size import model_size
 from data.Dataset_Random import Dataset
 from data.utils.load import load_video_num
 from utils.scheduler import create_scheduler
@@ -26,7 +25,7 @@ from utils.save import save_model_hook, save_checkpoint
 from utils.load import load_checkpoint
 from accelerate.utils import InitProcessGroupKwargs
 from datetime import datetime, timedelta
-
+from utils.tool import print_model_size
 
 random.seed(42)
 np.random.seed(42)
@@ -181,6 +180,7 @@ def learning():
     if rank == 0:
         print("Loading WorldVLN Model ... ")
     model, optimizer, scheduler = build_model_and_optimizer(config)
+    print_model_size(model)
     # 4. 加载数据
     if rank == 0:
         print("Loading Data ... ")
@@ -303,5 +303,4 @@ def learning():
 if __name__ == "__main__":
     learning()
 
-    # CUDA_VISIBLE_DEVICES=0,4 accelerate launch --multi_gpu --num_processes 2 --num_machines 1 --mixed_precision fp16 --dynamo_backend no train.py
-
+    # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --multi_gpu --num_processes 8 --num_machines 1 --mixed_precision fp16 --dynamo_backend no train.py

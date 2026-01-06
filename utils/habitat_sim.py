@@ -145,3 +145,30 @@ def get_observation(simulator, config):
     current_frame = torch.from_numpy(frames_np).permute(0, 3, 1, 2).float() / 255.0  # (1, C, H, W)
     current_frame = current_frame.to("cuda", dtype=torch.bfloat16)
     return current_frame
+
+
+def get_observation_visual(simulator, config):
+    obs = simulator.get_sensor_observations()
+    rgb = obs["rgb_sensor"][:, :, :3]
+    return rgb
+
+
+def find_more_paths_for_task(sim, reference_path):
+    all_paths = []
+    for i in range(len(reference_path) - 1):
+        start_position = reference_path[i]
+        end_position = reference_path[i + 1]
+        shortest_path = habitat_sim.ShortestPath()
+        shortest_path.requested_start = np.array(start_position)
+        shortest_path.requested_end = np.array(end_position)
+        success = sim.pathfinder.find_path(shortest_path)
+        path = shortest_path.points 
+        if success and shortest_path.points:
+            if all_paths:
+                # 如果已经有路径，去除当前路径的第一个点（避免重复）
+                points = [point.tolist() for point in shortest_path.points[1:]] 
+                all_paths.extend(points)
+            else:
+                # 如果是第一个路径，直接添加
+                all_paths.extend([point.tolist() for point in shortest_path.points]) 
+    return all_paths
