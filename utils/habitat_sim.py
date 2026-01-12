@@ -6,7 +6,7 @@ import numpy as np
 from data.utils.image_utils import resize_with_padding
 import torch
 
-def env_config(config, scene_id):
+def env_config(config, scene_id, device):
     env_cfg = habitat_sim.SimulatorConfiguration()
     env_cfg.scene_id = os.path.join(config.simulator.path.scene_root, scene_id, scene_id + ".glb")
     env_cfg.enable_physics = True
@@ -66,32 +66,32 @@ def count_delta_yaw(prev_rotation, curr_rotation):
     return yaw
 
 
-def action_point(simulator, agent_cfg, distance, angle):
+def action_point(simulator, distance, angle, agent_id):
     """angle : 弧度 (左转正数，右转负数)"""
     # 1. 配置移动步距
-    agent_cfg.action_space["move_forward"].actuation.amount = distance
+    simulator.agents[agent_id].agent_config.action_space["move_forward"].actuation.amount = distance
     # 2. 获取移动前状态
-    agent = simulator.get_agent(0)
+    agent = simulator.get_agent(agent_id)
     pre_state = agent.get_state()
     # 3. 实际旋转
     if angle >= 0: # turn left
-        agent_cfg.action_space["turn_left"].actuation.amount = math.degrees(angle)
-        simulator.step("turn_left")
+        simulator.agents[agent_id].agent_config.action_space["turn_left"].actuation.amount = math.degrees(angle)
+        agent.act("turn_left")
     else:           # turn right
-        agent_cfg.action_space["turn_right"].actuation.amount = -math.degrees(angle)
-        simulator.step("turn_right")
+        simulator.agents[agent_id].agent_config.action_space["turn_right"].actuation.amount = -math.degrees(angle)
+        agent.act("turn_right")
     # 4. 计算实际旋转弧度
     turn_state = agent.get_state()
     yaw_delta = count_delta_yaw(pre_state.rotation, turn_state.rotation)
     # 5. 实际移动
-    simulator.step("move_forward")
+    agent.act("move_forward")
     # 6. 计算实际移动距离
     move_state = agent.get_state()
     dis_delta = np.linalg.norm(np.array(pre_state.position) - np.array(move_state.position))
     return dis_delta, yaw_delta
 
 
-def get_yaw_and_dist(sim, target_pos):
+def get_yaw_and_dist(sim, target_pos, agent_id):
     def _quat_conj(q):
         return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float32)
     def _quat_mul(q1, q2):
@@ -108,7 +108,7 @@ def get_yaw_and_dist(sim, target_pos):
         vq = np.array([v[0], v[1], v[2], 0.0], dtype=np.float32)
         return _quat_mul(_quat_mul(q_xyzw, vq), _quat_conj(q_xyzw))[:3]
     
-    agent = sim.get_agent(0)
+    agent = sim.get_agent(agent_id)
     s = agent.get_state()
     cur_pos = np.asarray(s.position, dtype=np.float32)
     q = np.array([s.rotation.x, s.rotation.y, s.rotation.z, s.rotation.w], dtype=np.float32)
@@ -147,6 +147,43 @@ def get_observation(simulator, config):
     return current_frame
 
 
+def get_agent_id_observation(simulator, config, agent_id, device):
+    obs = simulator.get_sensor_observations(agent_id)
+    rgb = obs["rgb_sensor"][:, :, :3]
+    frames_np = np.expand_dims(rgb, axis=0) 
+    resized = [resize_with_padding(frames_np[i], (config.main.predicted_frame_height, config.main.predicted_frame_width)) for i in range(frames_np.shape[0])]
+    frames_np = np.stack(resized, axis=0)
+    current_frame = torch.from_numpy(frames_np).permute(0, 3, 1, 2).float() / 255.0  # (1, C, H, W)
+    current_frame = current_frame.squeeze(0).to(device, dtype=torch.bfloat16)
+    return current_frame
+
+
+def get_all_agent_observation(simulator, config, device):
+    curr_obers = []
+    for agent in range(len(simulator.agents)):
+        obs = simulator.get_sensor_observations(agent)
+        rgb = obs["rgb_sensor"][:, :, :3]  # (H, W, 3)
+        frames_np = np.expand_dims(rgb, axis=0)  # (1, H, W, 3)
+        resized = [
+            resize_with_padding(
+                frames_np[i],
+                (config.main.predicted_frame_height, config.main.predicted_frame_width),
+            )
+            for i in range(frames_np.shape[0])
+        ]
+        frames_np = np.stack(resized, axis=0)  # (1, H, W, 3)
+        current_frame = (
+            torch.from_numpy(frames_np)
+            .permute(0, 3, 1, 2)
+            .float()
+            .div(255.0)
+        )  
+        current_frame = current_frame.squeeze(0).to("cuda", dtype=torch.bfloat16)  # (3, 224, 224)
+        curr_obers.append(current_frame)
+        
+    return torch.stack(curr_obers).to(device)
+
+
 def get_observation_visual(simulator, config):
     obs = simulator.get_sensor_observations()
     rgb = obs["rgb_sensor"][:, :, :3]
@@ -172,3 +209,15 @@ def find_more_paths_for_task(sim, reference_path):
                 # 如果是第一个路径，直接添加
                 all_paths.extend([point.tolist() for point in shortest_path.points]) 
     return all_paths
+
+
+
+def environment_multi_agents(config, scene_id, agent_num, device):
+    env_cfg = env_config(config, scene_id, device)
+    agent_cfg = agent_config(config)
+    all_agent_cfg = []
+    for i in range(agent_num):
+        all_agent_cfg.append(agent_cfg)
+    sim_cfg = habitat_sim.Configuration(env_cfg, all_agent_cfg)
+    sim = habitat_sim.Simulator(sim_cfg)
+    return sim, env_cfg

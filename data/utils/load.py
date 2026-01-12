@@ -1,7 +1,13 @@
+import sys, os
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(root_path)
+
 from decord import VideoReader, cpu
 import torch
 import numpy as np
-from .image_utils import resize_with_padding
+from data.utils.image_utils import resize_with_padding
+from model.utils.padding import padding_t5_text_single
+
 
 def load_video_num(video_path):
     vr = VideoReader(video_path, ctx=cpu(0), num_threads=4)
@@ -39,3 +45,9 @@ def load_instruction(instruction_path):
     with open(instruction_path, 'r') as file:
         instructions = file.read()
     return instructions
+
+
+def load_instruction_embedding(instruction_embed_path, text_len = 512):
+    instruction_embed = torch.load(instruction_embed_path, map_location='cpu')
+    instruction_embed = padding_t5_text_single(instruction_embed, text_len)
+    return instruction_embed

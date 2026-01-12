@@ -3,7 +3,6 @@ from .tool.build_network import build_mlp
 from transformers import Qwen3VLForConditionalGeneration, AutoConfig, AutoProcessor
 from .understand_config import UnderstandModelConfig
 from .understand_block import UndModelBlock
-from .understand_decoder import UnderstandnDecoder
 
 class UnderstandModel(nn.Module):
     def __init__(self, config: UnderstandModelConfig, wan_config, dtype, vlm_path, device):
@@ -27,6 +26,4 @@ class UnderstandModel(nn.Module):
         # 4. 加载 block
         self.blocks = nn.ModuleList([UndModelBlock(config, wan_config) for _ in range(config.num_layers)])
         self.blocks.to(device)
-        # 5. 加载decoder （二分类 停止/继续）
-        self.decoder = UnderstandnDecoder(config)
 

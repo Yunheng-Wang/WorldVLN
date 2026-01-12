@@ -11,7 +11,9 @@ from .modules.action_module import ActionModule
 from .utils.wan.utils.fm import FlowMatchScheduler
 from .modules.understand_model import UnderstandModelConfig, UnderstandModel
 from .modules.understand_module import UnderstandModule
-from .utils.padding import padding_t5_text
+from .utils.padding import padding_t5_text_muilt
+from utils.promot import Video_Model_Prompt
+
 
 class WorldVLN(nn.Module):
     def __init__(self, config: WorldVLNConfig):
@@ -24,7 +26,8 @@ class WorldVLN(nn.Module):
         # 2. 加载 Video Model
         self.video_model = WanVideoModel.from_pretrained(
                 root_path = config.video_wan_root,
-                precision = config.video_wan_precision
+                precision = config.video_wan_precision,
+                have_t5 = config.t5_text_encoder
             )
         self.device = next(self.video_model.parameters()).device
         self.video_module = VideoModule(self.video_model, self.config, self.dtype, self.device)
@@ -87,6 +90,7 @@ class WorldVLN(nn.Module):
     def training_step(
         self,
         instruction: str,           # string 
+        instruction_embed: torch.Tensor,    # [B, 512, 4096]
         cur_frame: torch.Tensor,    # [B, C, H, W]
         his_frame: torch.Tensor,    # [B, N, C, H, W]
         tar_frame: torch.Tensor,    # [B, N, C, H, W]
@@ -118,12 +122,9 @@ class WorldVLN(nn.Module):
         video_tokens = self.video_module.latent_to_token(noisy_video_latent.to(self.dtype))
         ## 1.6 获得时间嵌入 和 adaln 调制参数
         video_head_time_emb, video_adaln_params  = self.video_module.time_embedding(video_t_embed, video_tokens.shape[1])
-        ## 1.7 获取指令的t5编码
+        ## 1.7 获取指令的t5编码token
         with torch.no_grad():
-            video_text_embedding = self.video_model.t5(instruction, self.device)
-            video_text_embedding = padding_t5_text(video_text_embedding, 512)
-            video_text_tokens = self.video_model.wan_model.text_embedding(video_text_embedding)
-        
+            video_text_tokens = self.video_model.wan_model.text_embedding(instruction_embed)
         # 2. Action Model 
         ## 2.1 时间编码
         timestep_id_action = torch.randint(0, self.fm_train_scheduler_action.num_train_timesteps, (B,))
@@ -216,29 +217,28 @@ class WorldVLN(nn.Module):
         action_predict = self.action_model.decoder(action_tokens, action_head_time_emb)
         action_predict = action_predict[:, :action_predict.shape[1] - self.action_model.config.num_registers, :]
         
-        # 7. 通过 Understand Decoder (判断任务是否继续)
-        understand_predict = self.understand_model.decoder(understand_tokens)
-        understand_predict = understand_predict.squeeze(-1)
         # 7. 计算损失
         video_loss = torch.nn.functional.mse_loss(video_predict, video_target, reduction='mean')
         action_loss = torch.nn.functional.mse_loss(action_predict, action_target, reduction='mean')
-        understand_loss_fn = torch.nn.BCEWithLogitsLoss()
-        understand_loss = understand_loss_fn(understand_predict, stop_label.view(-1).float())
 
-        total_loss = self.config.video_loss_weight * video_loss + self.config.action_loss_weight * action_loss + self.config.understand_loss_weight * understand_loss
+        total_loss = self.config.video_loss_weight * video_loss + self.config.action_loss_weight * action_loss
         
-        return total_loss, video_loss, action_loss, understand_loss
+        return total_loss, video_loss, action_loss
 
 
     def inference_step(
         self,
         instruction: str,           # string 
+        instruction_embed: torch.Tensor,    # [B, 512, 4096]
         cur_frame: torch.Tensor,    # [B, C, H, W]
         his_frame: torch.Tensor,    # [B, N, C, H, W]
-        inference_steps_num: int
+        inference_steps_num: int,
+        infer_stop: bool,
+        have_t5: bool
     ):
-    
+
         B = cur_frame.shape[0]
+        video_model_latent_size = torch.tensor([1 + self.config.predict_frame_num // 4, self.config.predict_frame_h // 32, self.config.predict_frame_w // 32], dtype=torch.long, device=self.device).unsqueeze(0).expand(his_frame.shape[0], -1)
 
         # 1. Video Model
         ## 1.1 将 当前帧 VAE 编码成 latent（VAE 不会被更新）
@@ -251,10 +251,14 @@ class WorldVLN(nn.Module):
         video_latent = torch.randn((B, C_latent, num_total_latent_frames, H_latent, W_latent), device=self.device, dtype=self.dtype)
         video_latent[:, :, 0:1] = cur_frame_latent
         ## 1.3 将 指令编码
-        with torch.no_grad():
-            video_text_embedding = self.video_model.t5(instruction, self.device)
-            video_text_embedding = padding_t5_text(video_text_embedding, 512)
-            video_text_tokens = self.video_model.wan_model.text_embedding(video_text_embedding)
+        if have_t5:
+            with torch.no_grad():
+                video_text_embedding = self.video_model.t5([ Video_Model_Prompt["user"].format(text) for text in instruction], self.device)
+                video_text_embedding = padding_t5_text_muilt(video_text_embedding, 512)
+                video_text_tokens = self.video_model.wan_model.text_embedding(video_text_embedding)
+        else:
+            with torch.no_grad():
+                video_text_tokens = self.video_model.wan_model.text_embedding(instruction_embed)
 
         # 3. Action Model
         ## 3.1 随机初始化未来动作序列噪声latent
@@ -314,7 +318,7 @@ class WorldVLN(nn.Module):
                     ### 4.5.3.4 计算联合 self-attention
                     freqs = self.video_model.wan_model.freqs.to(self.device)
                     seq_lens = torch.full((batch_size,), video_tokens_num + action_tokens_num + understand_tokens_num, dtype=torch.long, device=self.device)
-                    video_output, action_output, understand_output = self.video_model.wan_model.blocks[layer_idx].self_attn(video_tokens_processed, seq_lens, self.video_model_latent_size, freqs, action_q, action_k, action_v, understand_q, understand_k, understand_v)
+                    video_output, action_output, understand_output = self.video_model.wan_model.blocks[layer_idx].self_attn(video_tokens_processed, seq_lens, video_model_latent_size, freqs, action_q, action_k, action_v, understand_q, understand_k, understand_v)
                     ## 4.5.4 映射回原有维度
                     understand_output = self.understand_model.blocks[layer_idx].video_to_understand_projector(understand_output.flatten(2))
                     action_output = self.action_model.blocks[layer_idx].video_to_action_projector(action_output.flatten(2))
@@ -342,7 +346,7 @@ class WorldVLN(nn.Module):
 
             # 4.6 通过 Video Diffusion Head
             video_predict_head = self.video_model.wan_model.head(video_tokens, video_head_time_emb)
-            video_predict = self.video_model.wan_model.unpatchify(video_predict_head, self.video_model_latent_size)
+            video_predict = self.video_model.wan_model.unpatchify(video_predict_head, video_model_latent_size)
             video_predict = torch.stack([u.float() for u in video_predict], dim=0)
             # 4.7 通过 Action Diffusion Head
             action_predict = self.action_model.decoder(action_tokens, action_head_time_emb)
@@ -364,15 +368,14 @@ class WorldVLN(nn.Module):
             predicted_frames = (predicted_frames + 1.0) / 2.0 
             predicted_frames = torch.clamp(predicted_frames, 0, 1).float()
             predicted_frames = predicted_frames.permute(0, 2, 1, 3, 4)
-        
-        # 6. 停止符解码（0-执行完该动作继续；1-执行完该动作停止）
-        with torch.no_grad():
-            understand_predict = self.understand_model.decoder(understand_tokens)
-            understand_predict = understand_predict.squeeze(-1)
-            understand_predict = torch.sigmoid(understand_predict)    
-            stop_flag = (understand_predict > 0.5).int()
 
         # 6. 标准化动作
         predicted_actions = action_latent.float()
-
-        return predicted_frames, predicted_actions, stop_flag
+        
+        # 7. Continue or Stop (0/1)
+        if infer_stop == True:
+            stop_label = self.understand_module.Progress_Inference(instruction, his_frame, cur_frame)
+            return predicted_frames, predicted_actions, stop_label
+        else:
+            stop_label = None
+            return predicted_frames, predicted_actions, stop_label

@@ -1,14 +1,13 @@
-type: "val_unseen"
 
+data_root: "/home/CONNECT/yfang870/yunhengwang/WorldVLN/dataset"
+wan_root: "/home/CONNECT/yfang870/yunhengwang/WorldVLN/checkpoints/Wan2.2-TI2V-5B"
 
-task_root_path: "/home/CONNECT/yfang870/yunhengwang/WorldVLN/dataset/tasks"
-scene_root_path: "/home/CONNECT/yfang870/yunhengwang/WorldVLN/dataset/scene/mp3d"
-output_path: "/home/CONNECT/yfang870/yunhengwang/WorldVLN/dataset/cache"
 
 
 trajectory:
   interval: 0.2
   smooth: [5,2]
+
 
 
 agent:

@@ -7,6 +7,7 @@ import json
 import torch.nn.functional as F
 import torch.distributed as dist
 import numpy as np
+import habitat_sim
 from accelerate.logging import get_logger
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast
@@ -18,7 +19,8 @@ from datetime import datetime
 
 from model.WorldVLNConfig import WorldVLNConfig
 from model.WorldVLN import WorldVLN
-from data.Dataset_Random import Dataset
+from data.Dataset_Random import Dataset_Random
+from data.Dataset_Normal import Dataset_Normal_Train, Dataset_Normal_Val
 from data.utils.load import load_video_num
 from utils.scheduler import create_scheduler
 from utils.save import save_model_hook, save_checkpoint
@@ -26,6 +28,7 @@ from utils.load import load_checkpoint
 from accelerate.utils import InitProcessGroupKwargs
 from datetime import datetime, timedelta
 from utils.tool import print_model_size
+from utils.habitat_sim import environment_multi_agents, find_more_paths_for_task, action_point, get_yaw_and_dist, get_all_agent_observation, get_agent_id_observation
 
 random.seed(42)
 np.random.seed(42)
@@ -91,7 +94,10 @@ def build_model_and_optimizer(config):
         # loss
         video_loss_weight = config.model.loss.video_loss_weight,
         action_loss_weight = config.model.loss.action_loss_weight,
-        understand_loss_weight = config.model.loss.understand_loss_weight
+
+        # strategy
+        t5_text_encoder = False
+
     )
     model = WorldVLN(model_config)
     # 2. 加载学习率
@@ -124,8 +130,13 @@ def build_dataloader(config, world_size, rank):
         random.seed(worker_seed)
         torch.manual_seed(worker_seed)
     # 1. 加载数据
-    train_dataset = Dataset(os.path.join(config.main.data_root, "train"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
-    val_unseen_dataset = Dataset(os.path.join(config.main.data_root, "val_unseen"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
+    if config.main.sample_selection == "random":
+        train_dataset = Dataset_Random(os.path.join(config.main.data_root, "train"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
+        val_unseen_dataset = Dataset_Random(os.path.join(config.main.data_root, "val_unseen"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
+    elif config.main.sample_selection == "normal":
+        train_dataset = Dataset_Normal_Train(os.path.join(config.main.data_root, "train"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
+        val_unseen_dataset = Dataset_Normal_Val(os.path.join(config.main.data_root, "val_unseen"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width, config)
+
     # 2. 配置加载数据分布式
     if world_size > 1:
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
@@ -146,7 +157,7 @@ def build_dataloader(config, world_size, rank):
     )
     val_unseen_dataloader = DataLoader(
         val_unseen_dataset,
-        batch_size = config.main.batch_size,
+        batch_size = 1,
         shuffle = False,
         sampler = val_seen_sampler,
         num_workers = config.main.cpu_workers_num,
@@ -188,7 +199,7 @@ def learning():
     # 5. 配置模型保存设置
     accelerator.register_save_state_pre_hook(lambda models, weights, output_dir: save_model_hook(models, weights, output_dir, accelerator))
     # 6. 分布式分发
-    model, optimizer, train_dataloader, val_unseen_dataloader, scheduler = accelerator.prepare(model, optimizer, train_dataloader, val_unseen_dataloader, scheduler)
+    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     # 7. 训练
     if rank == 0:
         print("Start Training ...")
@@ -215,11 +226,12 @@ def learning():
         pred_video = batch['pred_frames'].to("cuda", dtype = torch.bfloat16) 
         action = batch['action'].to("cuda", dtype = torch.bfloat16) 
         instruction = batch['instruction']
+        instruction_embed = batch['instruction_embed'].to("cuda", dtype = torch.bfloat16) 
         stop_label = batch['stop_label'].to("cuda", dtype = torch.bfloat16) 
         ## 7.3. 前向推理
         model = model.module if hasattr(model, 'module') else model
         with autocast(dtype=torch.float32):
-            total_loss, video_loss, action_loss, understand_loss = model.training_step(instruction, cur_frame, his_video, pred_video, action, stop_label)
+            total_loss, video_loss, action_loss = model.training_step(instruction, instruction_embed, cur_frame, his_video, pred_video, action, stop_label)
         ## 7.4. 梯度同步 & 反向传播
         accelerator.backward(total_loss)
         ## 7.5. 梯度裁剪
@@ -230,74 +242,200 @@ def learning():
         scheduler.step()
         global_step += 1 
         ## 7.7. 刷新训练loss结果
-        logger.info(f"Step: {global_step}/{config.main.max_steps}, Epoch: {epoch}, Total Loss: {total_loss:.4f}, Video Loss: {video_loss:.4f}, Action Loss: {action_loss:.4f}, Understand Loss: {understand_loss:.4f}")
-        ## 7.8 模型保存 & 验证 val_unseen 结果（每过一个epoch）
-        if epoch != signal:
+        logger.info(f"Step: {global_step}/{config.main.max_steps}, Epoch: {epoch}, Total Loss: {total_loss:.4f}, Video Loss: {video_loss:.4f}, Action Loss: {action_loss:.4f}")
+        # 7.8 验证 val_unseen 结果
+        if epoch - signal >= config.eval.run_interval and config.eval.switch:
             model.eval()
-            val_loss = {"video_mse_loss": [], "action_mse_loss": [], "action_mse_loss_std": [], "action_l2_loss": [], "action_l2_loss_std": [], "stop_accuracy": []}
-            for step, batch_val in enumerate(val_unseen_dataloader):
-                ### 7.9.1 整理验证集数据
-                val_cur_frame = batch_val['cur_frame'].to("cuda", dtype = torch.bfloat16)  
-                val_his_video = batch_val['his_frames'].to("cuda", dtype = torch.bfloat16) 
-                gt_pred_video = batch_val['pred_frames'].to("cuda", dtype = torch.bfloat16) 
-                gt_action = batch_val['action'].to("cuda", dtype = torch.bfloat16) 
-                val_instruction = batch_val['instruction']
-                stop_label = batch_val['stop_label'].to("cuda", dtype = torch.bfloat16) 
-                ## 7.9.2 推理
-                with torch.no_grad(): 
-                    predicted_frames, predicted_actions, predicted_stop_flag = model.inference_step(val_instruction, val_cur_frame, val_his_video, config.main.inference.steps_for_denoising)
-                ## 7.9.3 计算均方误差（模型准确性）
-                val_loss["video_mse_loss"].append(F.mse_loss(predicted_frames, gt_pred_video, reduction='mean').item())
-                action_mse_loss = F.mse_loss(predicted_actions, gt_action, reduction='none').float()
-                val_loss["action_mse_loss"].append(action_mse_loss.reshape(action_mse_loss.shape[0], -1).mean(1).mean().item())
-                action_l2_loss = action_mse_loss.sqrt() / (1 + 1e-3)
-                action_l2_loss_per_sample = action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1)
-                val_loss["action_l2_loss"].append(action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1).mean().item())
-                ## 7.9.4 计算误差标准差（模型稳定性）
-                val_loss["action_mse_loss_std"].append(action_mse_loss.reshape(action_mse_loss.shape[0], -1).mean(1).std().item())
-                val_loss["action_l2_loss_std"].append(action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1).std().item())
-                ## 7.9.5 计算停止符准确性
-                val_stop_accuracy = (predicted_stop_flag == stop_label.view(-1)).float().mean()
-                val_loss["stop_accuracy"].append(val_stop_accuracy.item())
-                ## 7.9.6 打印
+            for step_global, batch_val in enumerate(val_unseen_dataloader):
+                # 7.8.0 整合指令
+                instruction = []
+                instruction_embed = []
+                # 7.8.1 创建虚拟环境
+                simulator, _ = environment_multi_agents(config, batch_val[0]["scene_id"][0], len(batch_val), accelerator.device)
+                # 7.8.2 创建agent
+                for agent_id in range(len(batch_val)):
+                    instruction.append(batch_val[agent_id]['instruction'][0])
+                    instruction_embed.append(batch_val[agent_id]["instruction_embed"].squeeze(0).to(device = accelerator.device))
+                    agent = simulator.initialize_agent(agent_id)
+                    initial_state = habitat_sim.AgentState()
+                    initial_state.position = batch_val[agent_id]["start_position"].tolist()[0]
+                    initial_state.rotation = batch_val[agent_id]["start_rotation"].tolist()[0]
+                    agent.set_state(initial_state)
+                    batch_val[agent_id]["reference_path"] = find_more_paths_for_task(simulator, batch_val[agent_id]["reference_path"].tolist()[0])
+                    yaw_err, _, dist_planar = get_yaw_and_dist(simulator, batch_val[agent_id]["reference_path"][1], agent_id)
+                    action_point(simulator, 0, yaw_err, agent_id)
+                # 7.8.3 核心执行
+                all_hist_obers = [[] for i in range(len(simulator.agents))]
+                step = 0
+                L = [ 0 for i in range(len(simulator.agents))]
+                stop = [ 0 for i in range(len(simulator.agents))] # 1 则停止
+                his_pose = [[] for i in range(len(simulator.agents))]
+                while step < config.eval.run_max_execution_steps:
+                    if all(sto == 1 for sto in stop):
+                        break  
+                    # 7.8.3.1 获取当前观测
+                    curr_obers = get_all_agent_observation(simulator, config, accelerator.device)
+                    # 7.8.3.2 获取历史观测
+                    input_hist_obers = []
+                    for agent in range(len(simulator.agents)):
+                        if stop[agent] == 0:
+                            if len(all_hist_obers[agent]) < config.eval.history_frames:
+                                num_missing_frames = config.eval.history_frames - len(all_hist_obers[agent])
+                                zero_frame = torch.zeros_like(curr_obers[agent], device = accelerator.device) 
+                                zero_frames = zero_frame.unsqueeze(0).repeat(num_missing_frames, 1, 1, 1)
+                                input_hist_obers.append(torch.cat([torch.tensor(all_hist_obers[agent], device = accelerator.device), zero_frames], dim=0))
+                                all_hist_obers[agent].append(curr_obers[agent])
+                            elif len(all_hist_obers[agent]) == config.eval.history_frames:
+                                input_hist_obers.append(torch.stack(all_hist_obers[agent], dim=0).to(accelerator.device))
+                                all_hist_obers[agent].append(curr_obers[agent])
+                            else:
+                                his_frames = random.sample(all_hist_obers[agent], config.eval.history_frames)
+                                input_hist_obers.append(torch.stack(his_frames, dim=0).to(accelerator.device))
+                                all_hist_obers[agent].append(curr_obers[agent])
+                    # 7.8.3.3 模型推理
+                    if config.eval.run_min_execution_steps > step:
+                        with torch.no_grad():
+                            predicted_frames, predicted_actions, predicted_stop_flag = model.inference_step([instr for instr, sto in zip(instruction, stop) if sto == 0], torch.stack([instr_embed for instr_embed, sto in zip(instruction_embed, stop) if sto == 0], dim=0), curr_obers[torch.tensor(stop) == 0],  torch.stack(input_hist_obers, dim=0), config.main.inference.steps_for_denoising, False, False)
+                            predicted_actions = predicted_actions[:, :config.eval.agent_execution_steps, :].tolist()
+                    else:
+                        with torch.no_grad():
+                            predicted_frames, predicted_actions, predicted_stop_flag = model.inference_step([instr for instr, sto in zip(instruction, stop) if sto == 0], torch.stack([instr_embed for instr_embed, sto in zip(instruction_embed, stop) if sto == 0], dim=0), curr_obers[torch.tensor(stop) == 0],  torch.stack(input_hist_obers, dim=0), config.main.inference.steps_for_denoising, True, False)
+                            predicted_actions = predicted_actions[:, :config.eval.agent_execution_steps, :].tolist()
+                    # 7.8.3.4 判断是否到达目的地
+                    if config.eval.run_min_execution_steps <= step:
+                        effective_idx = [i for i, x in enumerate(stop) if x == 0]
+                        for idx, sig_stop in enumerate(predicted_stop_flag):
+                            if sig_stop == 1:
+                                stop[effective_idx[idx]] = 1
+                        if all(sto == 1 for sto in stop):
+                            break 
+                    # 7.8.3.5 物理执行
+                    effective_idx = [i for i, x in enumerate(stop) if x == 0]
+                    for agent in range(len(simulator.agents)):
+                        if stop[agent] == 0: 
+                            for idx, action in enumerate(predicted_actions[effective_idx.index(agent)]):
+                                prev_pos = np.array(simulator.get_agent(agent).get_state().position, dtype=float)
+                                action_point(simulator, action[0], action[1], agent)
+                                new_pos = np.array(simulator.get_agent(agent).get_state().position, dtype=float)
+                                his_pose[agent].append(new_pos)
+                                L[agent] += float(np.linalg.norm(new_pos - prev_pos))
+                                if idx < config.eval.agent_execution_steps - 1:
+                                    all_hist_obers[agent].append(get_agent_id_observation(simulator, config, agent, accelerator.device))
+                    step += 1
+                # 7.8.4 评估SR & NE
+                SR = [0 for _ in range(len(simulator.agents))]
+                final_pos = [np.array(simulator.get_agent(agent).get_state().position[[0, 2]], dtype=float) for agent in range(len(simulator.agents))]
+                gt_pos = [np.array(batch_val[agent]["goal_position"].cpu(), dtype=float).flatten()[[0, 2]] for agent in range(len(simulator.agents))]
+                d = [np.linalg.norm(final_pos[agent] - gt_pos[agent]) for agent in range(len(simulator.agents))]
+                for i in range(len(d)):
+                    if d[i] <= 3:
+                        SR[i] = 1
+                # 7.8.5 评估 SRL
+                SPL = [SR[agent] * (batch_val[agent]['reference_distant'] / max(L[agent], batch_val[agent]['reference_distant'])) for agent in range(len(simulator.agents))]
+                # 7.8.6 评估 OSR
+                OSR = [0 for _ in range(len(simulator.agents))]
+                for agent in range(len(simulator.agents)):
+                    for i in his_pose[agent]:
+                        if np.linalg.norm(i[[0, 2]] - gt_pos[agent]) <= 3:
+                            OSR[agent] = 1
+                            break
+                # 7.8.7 整合
+                results = {}
+                for i in range(len(batch_val)):
+                    results[str(batch_val[i]["episode_id"].item())] = {"TL": L[i], "NE": d[i], "OSR": OSR[i], "SR": SR[i], "SPL": float(SPL[i])}
+                # 7.8.8 保存
+                file_path = os.path.join(save_path, str(epoch) + "_" + str(accelerator.device) + ".json")
+                if os.path.exists(file_path):
+                    with open(file_path, "r") as f:
+                        existing_data = json.load(f)
+                else:
+                    existing_data = {}
+                existing_data.update(results)
+                with open(file_path, "w") as f:
+                    json.dump(existing_data, f, indent=4)
+                # 7.8.9 打印日志
                 logger.info(
-                    f"Validation (Accumulated), Step: {step}, "
-                    f"Video Loss: {np.mean(val_loss['video_mse_loss']):.4f}, "
-                    f"Action Loss: {np.mean(val_loss['action_mse_loss']):.4f}, "
-                    f"Stop Accuracy: {np.mean(val_loss['stop_accuracy']):.4f}, "
-                ) 
-
-            if dist.is_initialized():
-                gathered_losses = {}
-                for key in val_loss:
-                    local_tensor = torch.tensor(val_loss[key], dtype=torch.float32, device=accelerator.device)
-                    gathered_tensor = [torch.zeros_like(local_tensor) for _ in range(world_size)]
-                    dist.all_gather(gathered_tensor, local_tensor)
-                    all_values = torch.cat(gathered_tensor, dim=0)
-                    gathered_losses[key] = all_values.cpu().numpy().tolist()
-            else:
-                gathered_losses = val_loss
-            if rank == 0:
-                logger.info(
-                    f"All Evaluation Validation, "
-                    f"Video Loss: {np.mean(gathered_losses['video_mse_loss']):.4f}, "
-                    f"Action Loss: {np.mean(gathered_losses['action_mse_loss']):.4f}, "
-                    f"Action MSE Loss Std: {np.mean(gathered_losses['action_mse_loss_std']):.4f}, "
-                    f"Action L2 Loss: {np.mean(gathered_losses['action_l2_loss']):.4f}, "
-                    f"Action L2 Loss Std: {np.mean(gathered_losses['action_l2_loss_std']):.4f}, "
-                    f"Stop Accuracy: {np.mean(gathered_losses['stop_accuracy']):.4f}, "
-                    f"Samples Num: {len(gathered_losses['stop_accuracy'])})"
-                )           
+                    f'Validation (Accumulated), Step: {step_global}, '
+                    f'SR: {sum(v.get("SR", 0) for v in existing_data.values()) / len(existing_data):.4f}, '
+                    f'SPL: {sum(v.get("SPL", 0) for v in existing_data.values()) / len(existing_data):.4f}, '
+                    f'NE: {sum(v.get("NE", 0) for v in existing_data.values()) / len(existing_data):.4f}, '
+                    f'TL: {sum(v.get("TL", 0) for v in existing_data.values()) / len(existing_data):.4f}, '
+                )
+                # 7.8.10 消除环境
+                simulator.close()
+            dist.barrier()
             model.train()
-
+        
+        # 7.9 模型保存
+        if epoch - signal >= config.eval.run_interval:
             save_checkpoint(accelerator, config, global_step, epoch, save_path)
             signal = epoch
             dist.barrier()
-    
-
+        
     # 8. 清理资源
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+ 
+        ## 7.8 模型保存 & 验证 val_unseen 结果（每过一个epoch）
+        # if epoch - signal >= 2:
+        #     model.eval()
+        #     val_loss = {"video_mse_loss": [], "action_mse_loss": [], "action_mse_loss_std": [], "action_l2_loss": [], "action_l2_loss_std": [], "stop_accuracy": []}
+        #     for step, batch_val in enumerate(val_unseen_dataloader):
+        #         ### 7.9.1 整理验证集数据
+        #         val_cur_frame = batch_val['cur_frame'].to("cuda", dtype = torch.bfloat16)  
+        #         val_his_video = batch_val['his_frames'].to("cuda", dtype = torch.bfloat16) 
+        #         gt_pred_video = batch_val['pred_frames'].to("cuda", dtype = torch.bfloat16) 
+        #         gt_action = batch_val['action'].to("cuda", dtype = torch.bfloat16) 
+        #         val_instruction = batch_val['instruction']
+        #         stop_label = batch_val['stop_label'].to("cuda", dtype = torch.bfloat16) 
+        #         ## 7.9.2 推理
+        #         with torch.no_grad(): 
+        #             predicted_frames, predicted_actions, _ = model.inference_step(val_instruction, val_cur_frame, val_his_video, config.main.inference.steps_for_denoising)
+        #         ## 7.9.3  
+        #         val_loss["video_mse_loss"].append(F.mse_loss(predicted_frames, gt_pred_video, reduction='mean').item())
+        #         action_mse_loss = F.mse_loss(predicted_actions, gt_action, reduction='none').float()
+        #         val_loss["action_mse_loss"].append(action_mse_loss.reshape(action_mse_loss.shape[0], -1).mean(1).mean().item())
+        #         action_l2_loss = action_mse_loss.sqrt() / (1 + 1e-3)
+        #         action_l2_loss_per_sample = action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1)
+        #         val_loss["action_l2_loss"].append(action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1).mean().item())
+        #         ## 7.9.4 计算误差标准差（模型稳定性）
+        #         val_loss["action_mse_loss_std"].append(action_mse_loss.reshape(action_mse_loss.shape[0], -1).mean(1).std().item())
+        #         val_loss["action_l2_loss_std"].append(action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1).std().item())
+        #         ## 7.9.5 打印
+        #         logger.info(
+        #             f"Validation (Accumulated), Step: {step}, "
+        #             f"Video Loss: {np.mean(val_loss['video_mse_loss']):.4f}, "
+        #             f"Action Loss: {np.mean(val_loss['action_mse_loss']):.4f}, "
+        #             f"Stop Accuracy: {np.mean(val_loss['stop_accuracy']):.4f}, "
+        #         ) 
+
+        #     if dist.is_initialized():
+        #         gathered_losses = {}
+        #         for key in val_loss:
+        #             local_tensor = torch.tensor(val_loss[key], dtype=torch.float32, device=accelerator.device)
+        #             gathered_tensor = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+        #             dist.all_gather(gathered_tensor, local_tensor)
+        #             all_values = torch.cat(gathered_tensor, dim=0)
+        #             gathered_losses[key] = all_values.cpu().numpy().tolist()
+        #     else:
+        #         gathered_losses = val_loss
+        #     if rank == 0:
+        #         logger.info(
+        #             f"All Evaluation Validation, "
+        #             f"Video Loss: {np.mean(gathered_losses['video_mse_loss']):.4f}, "
+        #             f"Action Loss: {np.mean(gathered_losses['action_mse_loss']):.4f}, "
+        #             f"Action MSE Loss Std: {np.mean(gathered_losses['action_mse_loss_std']):.4f}, "
+        #             f"Action L2 Loss: {np.mean(gathered_losses['action_l2_loss']):.4f}, "
+        #             f"Action L2 Loss Std: {np.mean(gathered_losses['action_l2_loss_std']):.4f}, "
+        #             f"Stop Accuracy: {np.mean(gathered_losses['stop_accuracy']):.4f}, "
+        #             f"Samples Num: {len(gathered_losses['stop_accuracy'])})"
+        #         )           
+        #     model.train()
+
+        #     save_checkpoint(accelerator, config, global_step, epoch, save_path)
+        #     signal = epoch
+        #     dist.barrier()
 
 
 if __name__ == "__main__":

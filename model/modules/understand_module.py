@@ -1,9 +1,10 @@
 import torch
+import re
 import torch.nn as nn
 from PIL import Image
 import numpy as np
 from qwen_vl_utils import process_vision_info
-
+from utils.promot import Understand_Model_Prompt, Understand_Model_Progress_Inference_Prompt
 
 class UnderstandModule(nn.Module):
     def __init__(self, udnerstand_model, config, dtype, device):
@@ -20,78 +21,44 @@ class UnderstandModule(nn.Module):
         current_frame_cpu = current_frame.detach().cpu()
         history_video_cpu = history_video.detach().cpu()
         curr_imgs_batch = [Image.fromarray((current_frame_cpu[b].float().permute(1, 2, 0).numpy() * 255).astype(np.uint8), mode='RGB') for b in range(current_frame_cpu.shape[0])]
-        hist_vide_batch = [[Image.fromarray((frame.float().permute(1, 2, 0).numpy() * 255).astype(np.uint8), mode='RGB') for frame in video] for video in history_video_cpu]
+        hist_vide_batch = [[Image.fromarray((frame.float().permute(1, 2, 0).numpy() * 255).astype(np.uint8), mode='RGB') for frame in video if not torch.all(frame == 0)] for video in history_video_cpu]
 
         # 2. 构建VLM输入
-        ## 2.1 第一步（无历史帧）
-        if len(hist_vide_batch) == 0:
-            input_ids_list = []
-            attention_mask_list = []
-            pixel_values_list = []
-            image_grid_thw_list = []
-            for index in range(B):
-                curr_imgs = curr_imgs_batch[index]
-                messages = [
-                    {
-                        "role": "user",
-                        "content": (
-                            [{"type": "image", "image": curr_imgs}]
-                            +
-                            [{"type": "text", "text": instruction_batch[index]}]
-                        )
-                    }
-                ]
-                text = self.undstand_model.vlm_processor.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-                image_inputs, video_inputs = process_vision_info(messages)
-                inputs = self.undstand_model.vlm_processor(
-                    text=[text],
-                    images=image_inputs,
-                    videos=video_inputs,
-                    padding=True,
-                    return_tensors="pt",
-                )
-                input_ids_list.append(inputs["input_ids"])          
-                attention_mask_list.append(inputs["attention_mask"])
-                pixel_values_list.append(inputs["pixel_values"])  
-                image_grid_thw_list.append(inputs["image_grid_thw"]) 
-        ## 2.1 非第一步（有历史帧）
-        else:
-            input_ids_list = []
-            attention_mask_list = []
-            pixel_values_list = []
-            image_grid_thw_list = []
-            for index in range(B):
-                curr_imgs = curr_imgs_batch[index]
-                hist_vide = hist_vide_batch[index]
-                messages = [
-                    {
-                        "role": "user",
-                        "content": (
-                            [{"type": "image", "image": img} for img in hist_vide]
-                            +
-                            [{"type": "image", "image": curr_imgs}]
-                            +
-                            [{"type": "text", "text": instruction_batch[index]}]
-                        )
-                    }
-                ]
-                text = self.undstand_model.vlm_processor.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-                image_inputs, video_inputs = process_vision_info(messages)
-                inputs = self.undstand_model.vlm_processor(
-                    text=[text],
-                    images=image_inputs,
-                    videos=video_inputs,
-                    padding=True,
-                    return_tensors="pt",
-                )
-                input_ids_list.append(inputs["input_ids"])          
-                attention_mask_list.append(inputs["attention_mask"])
-                pixel_values_list.append(inputs["pixel_values"])  
-                image_grid_thw_list.append(inputs["image_grid_thw"]) 
+        input_ids_list = []
+        attention_mask_list = []
+        pixel_values_list = []
+        image_grid_thw_list = []
+        for index in range(B):
+            curr_imgs = curr_imgs_batch[index]
+            hist_vide = hist_vide_batch[index]
+            messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        [{"type": "image", "image": img} for img in hist_vide]
+                        +
+                        [{"type": "image", "image": curr_imgs}]
+                        +
+                        [{"type": "text", "text": Understand_Model_Prompt["user"].format(instruction_batch[index])}]
+                    )
+                }
+            ]
+
+            text = self.undstand_model.vlm_processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.undstand_model.vlm_processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            input_ids_list.append(inputs["input_ids"])          
+            attention_mask_list.append(inputs["attention_mask"])
+            pixel_values_list.append(inputs["pixel_values"])  
+            image_grid_thw_list.append(inputs["image_grid_thw"]) 
         
         # 3. batch 之间补齐
         max_len = max(x.shape[1] for x in input_ids_list)
@@ -151,6 +118,7 @@ class UnderstandModule(nn.Module):
         with torch.no_grad():
             vlm_output = self.undstand_model.vlm_model.model.language_model(**vlm_kwargs)
         
+
         # 9. 提取最后一层的输出
         last_layer_features = vlm_output.hidden_states[-1]
 
@@ -158,3 +126,64 @@ class UnderstandModule(nn.Module):
         tokens = self.undstand_model.vlm_projector(last_layer_features)
 
         return tokens
+
+
+    def Progress_Inference(self, instruction_batch, history_video, current_frame):
+        # 1. 数据预处理
+        B = current_frame.shape[0]
+        current_frame_cpu = current_frame.detach().cpu()
+        history_video_cpu = history_video.detach().cpu()
+        curr_imgs_batch = [Image.fromarray((current_frame_cpu[b].float().permute(1, 2, 0).numpy() * 255).astype(np.uint8), mode='RGB') for b in range(current_frame_cpu.shape[0])]
+        hist_vide_batch = [[Image.fromarray((frame.float().permute(1, 2, 0).numpy() * 255).astype(np.uint8), mode='RGB') for frame in video if not torch.all(frame == 0)] for video in history_video_cpu]
+
+        stop_label = []
+        for index in range(B):
+            curr_imgs = curr_imgs_batch[index]
+            hist_vide = hist_vide_batch[index]
+            messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        [{"type": "image", "image": img} for img in hist_vide]
+                        +
+                        [{"type": "image", "image": curr_imgs}]
+                        +
+                        [{"type": "text", "text": Understand_Model_Progress_Inference_Prompt["user"].format(instruction_batch[index])}]
+                    )
+                }
+            ]
+            inputs = self.undstand_model.vlm_processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt"
+            )
+            inputs = inputs.to(self.device)
+            generated_ids = self.undstand_model.vlm_model.generate(**inputs, max_new_tokens=512)
+            generated_ids_trimmed = [
+                out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_text = self.undstand_model.vlm_processor.batch_decode(
+                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )
+
+            text_content = output_text[0] 
+            try:
+                match = re.search(r"Step\s*4.*?\b([01])\b", text_content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    progress_val = int(match.group(1))
+                else:
+                    fallback_matches = re.findall(r"\b([01])\b", text_content)
+                    if fallback_matches:
+                        progress_val = int(fallback_matches[-1])
+                    else:
+                        progress_val = 0
+            except Exception as e:
+                progress_val = 0
+            
+            stop_label.append(progress_val)
+        
+        return stop_label
+ 
+

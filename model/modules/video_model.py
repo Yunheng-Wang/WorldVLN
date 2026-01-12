@@ -40,7 +40,8 @@ class WanVideoModel(nn.Module):
         model_config: Dict[str, Any],
         root_path: str,
         device: str = "cuda",
-        precision: str = "bfloat16"
+        precision: str = "bfloat16",
+        have_t5: bool = True
     ):
         super().__init__()
         # 1. 设置设备
@@ -54,16 +55,20 @@ class WanVideoModel(nn.Module):
         # 3. 初始化 wan 模型（官方代码）
         self.wan_model = WanModel(**model_config)
         self.wan_model.to(device=self.device, dtype=self.precision)
-        # 4. 初始化 wan 的视频编码器 （官方代码）
+        # 4. 初始化 wan 的视频编码器 （官方代码）（冻结）
         self.vae = Wan2_2_VAE(vae_pth=os.path.join(root_path, "Wan2.2_VAE.pth"), device=self.device, dtype=self.precision)
+        for param in self.vae.model.parameters():
+            param.requires_grad = False
+        self.vae.model.eval()  
         # 5. 初始化 wan 的文本编码器
-        self.t5 = T5EncoderModel(
-            text_len=512,
-            dtype=self.precision,
-            device = self.device,
-            checkpoint_path=os.path.join(root_path, "models_t5_umt5-xxl-enc-bf16.pth"),
-            tokenizer_path=os.path.join(root_path, 'google/umt5-xxl'),
-        )
+        if have_t5:
+            self.t5 = T5EncoderModel(
+                text_len=512,
+                dtype=self.precision,
+                device = self.device,
+                checkpoint_path=os.path.join(root_path, "models_t5_umt5-xxl-enc-bf16.pth"),
+                tokenizer_path=os.path.join(root_path, 'google/umt5-xxl'),
+            )
 
 
     def encode_video(self, video_pixels: torch.Tensor) -> torch.Tensor:
@@ -211,7 +216,8 @@ class WanVideoModel(nn.Module):
         cls,
         root_path: str,
         device: str = "cuda",
-        precision: str = "bfloat16"
+        precision: str = "bfloat16",
+        have_t5: bool = True
     ) -> 'WanVideoModel':
 
         # 加载模型配置
@@ -224,7 +230,8 @@ class WanVideoModel(nn.Module):
             model_config=model_config,
             root_path=root_path,
             device=device,
-            precision=precision
+            precision=precision,
+            have_t5 = have_t5
         )
         
         # Load WAN weights - support directory and file formats

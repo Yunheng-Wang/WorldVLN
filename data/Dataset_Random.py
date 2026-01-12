@@ -6,7 +6,7 @@ from decord import VideoReader, cpu
 from data.utils.load import load_action, load_video_frames, load_video_num, load_instruction
 
 
-class Dataset(data.Dataset):
+class Dataset_Random(data.Dataset):
     def __init__(self, dataset_root, predict_num, history_num, height, weight):
         self.dataset_root = dataset_root
         self.predict_num = predict_num
@@ -62,12 +62,12 @@ class Dataset(data.Dataset):
                 # 3. 从下标加载数据
                 cur_frames = load_video_frames(episode['observation'], [current_frames_idx], self.image_size).squeeze(0)
                 his_frames = load_video_frames(episode['observation'], history_frames_idx, self.image_size)
-                ##* 若不足, 则补帧 保持bach的形状一致
+                #4. 补历史帧 保持bach的形状一致
                 if len(history_frames_idx) < self.history_num:
                     num_missing_frames = self.history_num - len(history_frames_idx)
                     zero_frame = torch.zeros_like(his_frames[0])  # 创建与现有帧相同形状的零帧
                     zero_frames = zero_frame.unsqueeze(0).repeat(num_missing_frames, 1, 1, 1)
-                    his_frames = torch.cat([zero_frames, his_frames], dim=0)
+                    his_frames = torch.cat([his_frames, zero_frames], dim=0)
                 pred_frames = load_video_frames(episode['observation'], predict_frames_idx, self.image_size)
                 actions = load_action(episode['action'], action_idx)
                 # 4. 加载 instruction

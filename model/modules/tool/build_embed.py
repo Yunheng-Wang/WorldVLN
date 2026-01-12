@@ -18,3 +18,4 @@ def get_1d_pos_embed(embed_dim, pos):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return torch.from_numpy(emb).float()
+

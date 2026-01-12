@@ -41,4 +41,6 @@ class WorldVLNConfig:
     # 4. loss
     video_loss_weight: int = 1
     action_loss_weight: int = 1
-    understand_loss_weight: int = 1
+
+    # 5. strategy 
+    t5_text_encoder: bool = True
