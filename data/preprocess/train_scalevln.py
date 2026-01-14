@@ -19,20 +19,18 @@ from tqdm import tqdm
 
 from model.utils.wan.modules.t5 import T5EncoderModel
 from utils.promot import Video_Model_Prompt
-from data.preprocess.utils.sim import environment
+from data.preprocess.utils.sim import environment_hm3d
 from data.preprocess.utils.action import smooth_path, interpolate_path, get_yaw_and_dist, count_delta_yaw, action_point, find_more_paths_for_task
 
 
 def load_task(config):
     grouped_tasks = {}
-    with open(os.path.join(config["data_root"], "tasks", "rxr_ce", "train/train_guide.json"), 'r', encoding='utf-8') as file:
+    with open(os.path.join(config["data_root"], "tasks", "scalevln", "scalevln.json"), 'r', encoding='utf-8') as file:
         task = json.load(file)
     for episode in task['episodes']:
-        if "en" not in episode["instruction"]["language"]:
-            continue
         scene_id = episode['scene_id']
         parts = scene_id.split('/')
-        scene_hash = parts[1] if len(parts) > 1 else parts[0].split('.')[0] 
+        scene_hash = parts[1] if len(parts) > 1 else parts[0].split('.')[0]  # 备用方案
         if scene_hash not in grouped_tasks:
             grouped_tasks[scene_hash] = []
         grouped_tasks[scene_hash].append(episode)
@@ -50,11 +48,11 @@ def main():
     # 4. 提取训练集数据
     for i, scene_id in enumerate(tqdm(tasks, desc="Scenes", unit="scene")):
         ## 4.1 创建虚拟环境
-        simulator, _, agent_cfg = environment(cfg, scene_id)
+        simulator, _, agent_cfg = environment_hm3d(cfg, scene_id)
         for id, task in enumerate(tqdm(tasks[scene_id], desc="Tasks", unit="task", leave=False)):
             action = []
             ## 4.2 配置保存目录
-            save_path = os.path.join(cfg["data_root"], "cache", "train", "mp3d_" + "rxr_ce" + "_" + scene_id + "_" + str(task["episode_id"]))
+            save_path = os.path.join(cfg["data_root"], "cache", "train", "hm3d_" + "scalevln" + "_" + scene_id.split('-')[1] + "_" + str(task["episode_id"]))
             if os.path.exists(os.path.join(save_path, 'action.npy')) and os.path.exists(os.path.join(save_path, 'instruction.txt')) and os.path.exists(os.path.join(save_path, 'observation.mp4')) and os.path.exists(os.path.join(save_path, 'instruction.pth')):
                 continue
             os.makedirs(save_path, exist_ok=True)

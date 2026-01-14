@@ -46,3 +46,19 @@ def environment(config, scene_id):
     sim_cfg = habitat_sim.Configuration(env_cfg, [agent_cfg])
     sim = habitat_sim.Simulator(sim_cfg)
     return sim, env_cfg, agent_cfg
+
+
+def env_config_hm3d(config, scene_id):
+    env_cfg = habitat_sim.SimulatorConfiguration()
+    env_cfg.scene_id = os.path.join(config["data_root"], "scene/hm3d", scene_id, scene_id.split('-')[1] + ".basis.glb")
+    env_cfg.enable_physics = False
+    env_cfg.allow_sliding = True
+    return env_cfg
+
+
+def environment_hm3d(config, scene_id):
+    env_cfg = env_config_hm3d(config, scene_id)
+    agent_cfg = agent_config(config)
+    sim_cfg = habitat_sim.Configuration(env_cfg, [agent_cfg])
+    sim = habitat_sim.Simulator(sim_cfg)
+    return sim, env_cfg, agent_cfg

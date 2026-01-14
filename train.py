@@ -22,7 +22,7 @@ from model.WorldVLN import WorldVLN
 from data.Dataset_Random import Dataset_Random
 from data.Dataset_Normal import Dataset_Normal_Train, Dataset_Normal_Val
 from data.utils.load import load_video_num
-from utils.scheduler import create_scheduler
+from utils.scheduler_linear import LambdaLinearScheduler
 from utils.save import save_model_hook, save_checkpoint
 from utils.load import load_checkpoint
 from accelerate.utils import InitProcessGroupKwargs
@@ -118,8 +118,7 @@ def build_model_and_optimizer(config):
         betas=(0.9, 0.95)
     )
     # 5. 学习率变化策略
-    scheduler = create_scheduler(optimizer, config)
-
+    scheduler = LambdaLinearScheduler(optimizer = optimizer, config = config)
     return model, optimizer, scheduler
 
 
@@ -242,9 +241,9 @@ def learning():
         scheduler.step()
         global_step += 1 
         ## 7.7. 刷新训练loss结果
-        logger.info(f"Step: {global_step}/{config.main.max_steps}, Epoch: {epoch}, Total Loss: {total_loss:.4f}, Video Loss: {video_loss:.4f}, Action Loss: {action_loss:.4f}")
+        logger.info(f"Step: {global_step}/{config.main.max_steps}, Epoch: {epoch}, Total Loss: {total_loss:.4f}, Video Loss: {video_loss:.4f}, Action Loss: {action_loss:.4f}, Action/Understand LR: {optimizer.param_groups[0]['lr']:.4e}, Video Model LR: {optimizer.param_groups[1]['lr']:.4e}")
         # 7.8 验证 val_unseen 结果
-        if epoch - signal >= config.eval.run_interval and config.eval.switch:
+        if epoch - signal >= config.main.interval and config.eval.switch:
             model.eval()
             for step_global, batch_val in enumerate(val_unseen_dataloader):
                 # 7.8.0 整合指令
@@ -367,7 +366,7 @@ def learning():
             model.train()
         
         # 7.9 模型保存
-        if epoch - signal >= config.eval.run_interval:
+        if epoch - signal >= config.main.interval:
             save_checkpoint(accelerator, config, global_step, epoch, save_path)
             signal = epoch
             dist.barrier()
@@ -376,69 +375,8 @@ def learning():
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
- 
-        ## 7.8 模型保存 & 验证 val_unseen 结果（每过一个epoch）
-        # if epoch - signal >= 2:
-        #     model.eval()
-        #     val_loss = {"video_mse_loss": [], "action_mse_loss": [], "action_mse_loss_std": [], "action_l2_loss": [], "action_l2_loss_std": [], "stop_accuracy": []}
-        #     for step, batch_val in enumerate(val_unseen_dataloader):
-        #         ### 7.9.1 整理验证集数据
-        #         val_cur_frame = batch_val['cur_frame'].to("cuda", dtype = torch.bfloat16)  
-        #         val_his_video = batch_val['his_frames'].to("cuda", dtype = torch.bfloat16) 
-        #         gt_pred_video = batch_val['pred_frames'].to("cuda", dtype = torch.bfloat16) 
-        #         gt_action = batch_val['action'].to("cuda", dtype = torch.bfloat16) 
-        #         val_instruction = batch_val['instruction']
-        #         stop_label = batch_val['stop_label'].to("cuda", dtype = torch.bfloat16) 
-        #         ## 7.9.2 推理
-        #         with torch.no_grad(): 
-        #             predicted_frames, predicted_actions, _ = model.inference_step(val_instruction, val_cur_frame, val_his_video, config.main.inference.steps_for_denoising)
-        #         ## 7.9.3  
-        #         val_loss["video_mse_loss"].append(F.mse_loss(predicted_frames, gt_pred_video, reduction='mean').item())
-        #         action_mse_loss = F.mse_loss(predicted_actions, gt_action, reduction='none').float()
-        #         val_loss["action_mse_loss"].append(action_mse_loss.reshape(action_mse_loss.shape[0], -1).mean(1).mean().item())
-        #         action_l2_loss = action_mse_loss.sqrt() / (1 + 1e-3)
-        #         action_l2_loss_per_sample = action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1)
-        #         val_loss["action_l2_loss"].append(action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1).mean().item())
-        #         ## 7.9.4 计算误差标准差（模型稳定性）
-        #         val_loss["action_mse_loss_std"].append(action_mse_loss.reshape(action_mse_loss.shape[0], -1).mean(1).std().item())
-        #         val_loss["action_l2_loss_std"].append(action_l2_loss.reshape(predicted_actions.shape[0], -1).mean(1).std().item())
-        #         ## 7.9.5 打印
-        #         logger.info(
-        #             f"Validation (Accumulated), Step: {step}, "
-        #             f"Video Loss: {np.mean(val_loss['video_mse_loss']):.4f}, "
-        #             f"Action Loss: {np.mean(val_loss['action_mse_loss']):.4f}, "
-        #             f"Stop Accuracy: {np.mean(val_loss['stop_accuracy']):.4f}, "
-        #         ) 
-
-        #     if dist.is_initialized():
-        #         gathered_losses = {}
-        #         for key in val_loss:
-        #             local_tensor = torch.tensor(val_loss[key], dtype=torch.float32, device=accelerator.device)
-        #             gathered_tensor = [torch.zeros_like(local_tensor) for _ in range(world_size)]
-        #             dist.all_gather(gathered_tensor, local_tensor)
-        #             all_values = torch.cat(gathered_tensor, dim=0)
-        #             gathered_losses[key] = all_values.cpu().numpy().tolist()
-        #     else:
-        #         gathered_losses = val_loss
-        #     if rank == 0:
-        #         logger.info(
-        #             f"All Evaluation Validation, "
-        #             f"Video Loss: {np.mean(gathered_losses['video_mse_loss']):.4f}, "
-        #             f"Action Loss: {np.mean(gathered_losses['action_mse_loss']):.4f}, "
-        #             f"Action MSE Loss Std: {np.mean(gathered_losses['action_mse_loss_std']):.4f}, "
-        #             f"Action L2 Loss: {np.mean(gathered_losses['action_l2_loss']):.4f}, "
-        #             f"Action L2 Loss Std: {np.mean(gathered_losses['action_l2_loss_std']):.4f}, "
-        #             f"Stop Accuracy: {np.mean(gathered_losses['stop_accuracy']):.4f}, "
-        #             f"Samples Num: {len(gathered_losses['stop_accuracy'])})"
-        #         )           
-        #     model.train()
-
-        #     save_checkpoint(accelerator, config, global_step, epoch, save_path)
-        #     signal = epoch
-        #     dist.barrier()
 
 
 if __name__ == "__main__":
     learning()
-
     # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --multi_gpu --num_processes 8 --num_machines 1 --mixed_precision fp16 --dynamo_backend no train.py

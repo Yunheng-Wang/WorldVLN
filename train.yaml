@@ -8,8 +8,9 @@ main:
   predicted_frame_width: 224
   predicted_frame_height: 224
   cpu_workers_num: 8
-  max_steps: 100000
+  max_steps: 1000000
   sample_selection: "normal" # random / normal
+  interval: 1
 
   gradient:
     grad_clip_norm: 0.5  # 梯度裁剪
@@ -25,7 +26,7 @@ eval:
   tasks_type: "r2r_ce"
   num: 512
   history_frames: 8
-  run_interval: 5
+  run_interval: 1
   run_max_execution_steps: 10
   run_min_execution_steps: 5
   agent_execution_steps: 8
@@ -87,11 +88,11 @@ optimizer:
   video_model_lr: 5.0e-5
   weight_decay: 0.01
 
-
+# 0 ~ warmup_steps: from f_start to 5.0e-5 ; 
+# warmup_steps ~ cycle_length: from 5.0e-5 to 0.5e-5
 scheduler:
-  scheduler_type: "linear"
   warmup_steps: 200
-  cycle_length: 5000000   
+  cycle_length: 1000000   
   f_max: 0.99           
   f_min: 0.4         
   f_start: 1.0e-6
