@@ -168,6 +168,39 @@ def build_dataloader(config, world_size, rank):
     return train_dataloader, val_unseen_dataloader
 
 
+
+def build_dataloader_special(config, world_size, rank):
+    def seed_worker(worker_id):
+        worker_seed = 42 + worker_id
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+    # 1. 加载数据
+    if config.main.sample_selection == "random":
+        train_dataset = Dataset_Random(os.path.join(config.main.data_root, "train"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
+    elif config.main.sample_selection == "normal":
+        train_dataset = Dataset_Normal_Train(os.path.join(config.main.data_root, "train"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width)
+
+    # 2. 配置加载数据分布式
+    if world_size > 1:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
+    else:
+        train_sampler = None
+    # 3. 创建数据迭代器
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size = config.main.batch_size,
+        shuffle = True if train_sampler is None else False,
+        sampler = train_sampler,
+        num_workers = config.main.cpu_workers_num,
+        pin_memory = True,
+        drop_last = True,
+        worker_init_fn = seed_worker,
+    )
+
+    return train_dataloader
+
+
 def learning():
     # 1. 加载配置参数 & 加载保存根目录
     config = OmegaConf.load('train.yaml')
@@ -194,7 +227,10 @@ def learning():
     # 4. 加载数据
     if rank == 0:
         print("Loading Data ... ")
-    train_dataloader, val_unseen_dataloader = build_dataloader(config, world_size, rank)
+    if config.eval.switch == True:
+        train_dataloader, val_unseen_dataloader = build_dataloader(config, world_size, rank)
+    elif config.eval.switch == False:
+        train_dataloader = build_dataloader_special(config, world_size, rank)
     # 5. 配置模型保存设置
     accelerator.register_save_state_pre_hook(lambda models, weights, output_dir: save_model_hook(models, weights, output_dir, accelerator))
     # 6. 分布式分发

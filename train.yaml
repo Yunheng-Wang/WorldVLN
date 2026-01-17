@@ -7,7 +7,7 @@ main:
   history_steps: 8
   predicted_frame_width: 224
   predicted_frame_height: 224
-  cpu_workers_num: 8
+  cpu_workers_num: 4
   max_steps: 1000000
   sample_selection: "normal" # random / normal
   interval: 1
@@ -21,7 +21,7 @@ main:
 
 
 eval:
-  switch: True
+  switch: False
   data_root: "dataset/tasks"
   tasks_type: "r2r_ce"
   num: 512
