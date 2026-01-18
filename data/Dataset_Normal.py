@@ -20,7 +20,7 @@ class Dataset_Normal_Train(data.Dataset):
         episodes = []
         for folder_name in os.listdir(self.dataset_root):
             folder_path = os.path.join(self.dataset_root, folder_name)
-            if os.path.isdir(folder_path):
+            if os.path.isdir(folder_path) :
                 files = {}
                 files["episode_name"] = folder_name
                 for file_name in os.listdir(folder_path):
@@ -33,7 +33,10 @@ class Dataset_Normal_Train(data.Dataset):
                         files['action'] = file_path
                     elif file_name == "instruction.pth":
                         files['instruction_embed'] = file_path
-            episodes.append(files)
+                if "instruction_embed" in files and "action" in files and "observation" in files and "instruction" in files:
+                    episodes.append(files)
+                else:
+                    continue
         return episodes
     
 
@@ -96,12 +99,13 @@ class Dataset_Normal_Train(data.Dataset):
 
 
 class Dataset_Normal_Val(data.Dataset):
-    def __init__(self, dataset_root, predict_num, history_num, height, weight, config):
+    def __init__(self, dataset_root, predict_num, history_num, height, weight, config, eval_all = False):
         self.dataset_root = dataset_root
         self.predict_num = predict_num
         self.history_num = history_num
         self.image_size = (height, weight)
         self.config = config
+        self.eval_all = eval_all
         self.batch = self._load_batch()
 
 
@@ -114,7 +118,10 @@ class Dataset_Normal_Val(data.Dataset):
         with open(os.path.join(self.config.eval.data_root, self.config.eval.tasks_type, "val_unseen", "val_unseen.json"), 'r', encoding='utf-8') as file:
             task = json.load(file)
         random.seed(42)
-        task['episodes'] = random.sample(task['episodes'], self.config.eval.num)
+        if self.eval_all == False:
+            task['episodes'] = random.sample(task['episodes'], self.config.eval.num)
+        elif self.eval_all == True:
+            task['episodes'] = task['episodes']
         grouped_tasks = {}
         for episode in task['episodes']:
             scene_id = episode['scene_id']

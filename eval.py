@@ -29,6 +29,7 @@ from accelerate.utils import InitProcessGroupKwargs
 from datetime import datetime, timedelta
 from utils.tool import print_model_size
 from utils.habitat_sim import environment_multi_agents, find_more_paths_for_task, action_point, get_yaw_and_dist, get_all_agent_observation, get_agent_id_observation
+from accelerate.utils import gather_object
 
 random.seed(42)
 np.random.seed(42)
@@ -109,7 +110,7 @@ def build_dataloader(config, world_size, rank):
         random.seed(worker_seed)
         torch.manual_seed(worker_seed)
     # 1. 加载数据
-    val_unseen_dataset = Dataset_Normal_Val(os.path.join(config.main.data_root, "val_unseen"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width, config)
+    val_unseen_dataset = Dataset_Normal_Val(os.path.join(config.main.data_root, "val_unseen"), config.main.prediction_steps, config.main.history_steps, config.main.predicted_frame_height, config.main.predicted_frame_width, config, "all")
 
     # 2. 配置加载数据分布式
     if world_size > 1:
@@ -276,7 +277,7 @@ def eval(checkpoint_path, batch_size, max_execution_steps, min_execution_steps):
         simulator.close()
     # 8. 收集所有 GPU 的字典结果并保存
     accelerator.wait_for_everyone()
-    gathered_results_list = accelerator.gather_object(results)
+    gathered_results_list = gather_object([results])
     if rank == 0:
         final_results = {}
         for res in gathered_results_list:

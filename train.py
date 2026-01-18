@@ -7,7 +7,10 @@ import json
 import torch.nn.functional as F
 import torch.distributed as dist
 import numpy as np
-import habitat_sim
+try:
+    import habitat_sim
+except ImportError:
+    pass
 from accelerate.logging import get_logger
 from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast
@@ -19,7 +22,10 @@ from datetime import datetime
 
 from model.WorldVLNConfig import WorldVLNConfig
 from model.WorldVLN import WorldVLN
-from data.Dataset_Random import Dataset_Random
+try:
+    from data.Dataset_Random import Dataset_Random
+except ImportError:
+    pass
 from data.Dataset_Normal import Dataset_Normal_Train, Dataset_Normal_Val
 from data.utils.load import load_video_num
 from utils.scheduler_linear import LambdaLinearScheduler
@@ -28,7 +34,11 @@ from utils.load import load_checkpoint
 from accelerate.utils import InitProcessGroupKwargs
 from datetime import datetime, timedelta
 from utils.tool import print_model_size
-from utils.habitat_sim import environment_multi_agents, find_more_paths_for_task, action_point, get_yaw_and_dist, get_all_agent_observation, get_agent_id_observation
+try:
+    from utils.habitat_sim import environment_multi_agents, find_more_paths_for_task, action_point, get_yaw_and_dist, get_all_agent_observation, get_agent_id_observation
+except ImportError:
+    pass
+
 
 random.seed(42)
 np.random.seed(42)
@@ -416,3 +426,8 @@ def learning():
 if __name__ == "__main__":
     learning()
     # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --multi_gpu --num_processes 8 --num_machines 1 --mixed_precision fp16 --dynamo_backend no train.py
+
+    # export NCCL_P2P_DISABLE=1
+    # export TORCH_NCCL_ENABLE_MONITORING=0
+    # export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+    # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch --machine_rank 1 --main_process_port 48569 train.py
